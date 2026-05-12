@@ -291,7 +291,13 @@ class BotManagerApp:
             self.tree.delete(item)
 
         with self.bots_lock:
+            seen_ids: set[str] = set()
             for bot in sorted(self.bots.values(), key=lambda b: b.name.lower()):
+                iid = bot.name or str(bot.path)
+                if not iid or iid in seen_ids:
+                    continue
+                seen_ids.add(iid)
+
                 status = "Running" if bot.is_running else "Stopped"
                 git_text = "Yes" if bot.is_git_repo else "No"
                 upd = "Available" if bot.update_available else "Up-to-date"
@@ -303,7 +309,7 @@ class BotManagerApp:
                 self.tree.insert(
                     "",
                     tk.END,
-                    iid=bot.name,
+                    iid=iid,
                     values=(status, bot.entry_file, git_text, upd, str(bot.path)),
                     tags=(tag,),
                 )
