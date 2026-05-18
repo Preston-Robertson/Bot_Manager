@@ -12,6 +12,8 @@ A lightweight desktop GUI to discover, run, update, and restart Python Discord b
 - **Auto update + restart**: pulls `main` and restarts running bots when changes are detected
 - Scheduled per-bot data backups into local zip archives (stored in a gitignored folder)
 - Backup status menu to view the last successful backup time per bot
+- Per-bot backup health badge: `Healthy`, `Due Soon`, `Overdue`, or `Failed`
+- Per-bot backup storage usage shown in the bot table
 - Live, per-bot log stream in the GUI
 - Settings persisted to `manager_config.json`
 
@@ -47,12 +49,14 @@ In the GUI:
    - a single bot folder itself.
 2. Click **Scan Bots**.
 3. Select a bot, then use **Start Bot / Stop Bot**, **Restart**, **Update Now**, or **Check Updates**.
+4. Watch each bot's **Backup** health badge and **Backup Size** directly in the table.
 
 Backups:
 
-1. Set **Backup Interval (sec)** to choose how often backups run.
+1. Set **Backup Interval (days)** to choose how often backups run.
 2. Use **Backup Now** for immediate backups from the main action bar.
 3. Use the **Backups** menu to see last backup times, back up selected bot now, or back up all bots now.
+4. Use **Open Backup Folder** (button or Backups menu) to open local backup storage directly in your file explorer.
 
 Backups are saved under `bot_data/<bot_name>/` as timestamped `.zip` files and are kept until you manually delete them.
 
@@ -86,7 +90,7 @@ User settings are stored in `manager_config.json` (gitignored). A template is pr
   "bots_root": "",
   "python_executable": "",
   "update_interval_sec": 120,
-  "backup_interval_sec": 600,
+  "backup_interval_days": 1,
   "auto_update_restart": true
 }
 ```

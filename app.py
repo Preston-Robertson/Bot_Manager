@@ -1,5 +1,6 @@
 import json
 import os
+import platform
 import queue
 import re
 import subprocess
@@ -57,7 +58,7 @@ class AppConfig:
     bots_root: str = ""
     python_executable: str = ""
     update_interval_sec: int = 120
-    backup_interval_sec: int = 600
+    backup_interval_days: int = 1
     auto_update_restart: bool = True
 
     @classmethod
@@ -66,11 +67,18 @@ class AppConfig:
             return cls()
         try:
             data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            backup_interval_days_raw = data.get("backup_interval_days")
+            if backup_interval_days_raw is None:
+                # Backward compatibility for older configs that stored seconds.
+                legacy_backup_sec = int(data.get("backup_interval_sec", 600))
+                backup_interval_days = max(1, (legacy_backup_sec + 86399) // 86400)
+            else:
+                backup_interval_days = max(1, int(backup_interval_days_raw))
             return cls(
                 bots_root=str(data.get("bots_root", "")),
                 python_executable=str(data.get("python_executable", "")),
                 update_interval_sec=int(data.get("update_interval_sec", 120)),
-                backup_interval_sec=int(data.get("backup_interval_sec", 600)),
+                backup_interval_days=backup_interval_days,
                 auto_update_restart=bool(data.get("auto_update_restart", True)),
             )
         except Exception:
@@ -81,7 +89,7 @@ class AppConfig:
             "bots_root": self.bots_root,
             "python_executable": self.python_executable,
             "update_interval_sec": self.update_interval_sec,
-            "backup_interval_sec": self.backup_interval_sec,
+            "backup_interval_days": self.backup_interval_days,
             "auto_update_restart": self.auto_update_restart,
         }
         CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -143,8 +151,8 @@ class BotManagerApp:
         self.interval_entry = ttk.Entry(options, textvariable=self.interval_var, width=8)
         self.interval_entry.pack(side=tk.LEFT, padx=(8, 12))
 
-        ttk.Label(options, text="Backup Interval (sec):").pack(side=tk.LEFT)
-        self.backup_interval_var = tk.StringVar(value="600")
+        ttk.Label(options, text="Backup Interval (days):").pack(side=tk.LEFT)
+        self.backup_interval_var = tk.StringVar(value="1")
         self.backup_interval_entry = ttk.Entry(options, textvariable=self.backup_interval_var, width=8)
         self.backup_interval_entry.pack(side=tk.LEFT, padx=(8, 12))
 
@@ -184,24 +192,29 @@ class BotManagerApp:
         ttk.Button(actions, text="Update Now", command=self.update_selected).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(actions, text="Check Updates", command=self.check_updates_now).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(actions, text="Backup Now", command=self.backup_selected).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(actions, text="Open Backup Folder", command=self.open_backup_folder).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(actions, text="Save Settings", command=self._save_config_from_ui).pack(side=tk.RIGHT)
 
         table_wrap = ttk.Frame(upper)
         table_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        columns = ("status", "entry", "git", "update", "path")
+        columns = ("status", "entry", "git", "update", "backup", "storage", "path")
         self.tree = ttk.Treeview(table_wrap, columns=columns, show="headings", height=12)
         self.tree.heading("status", text="Status")
         self.tree.heading("entry", text="Entry")
         self.tree.heading("git", text="Git")
         self.tree.heading("update", text="Update")
+        self.tree.heading("backup", text="Backup")
+        self.tree.heading("storage", text="Backup Size")
         self.tree.heading("path", text="Path")
 
         self.tree.column("status", width=90, anchor=tk.CENTER)
         self.tree.column("entry", width=120, anchor=tk.CENTER)
         self.tree.column("git", width=70, anchor=tk.CENTER)
         self.tree.column("update", width=120, anchor=tk.CENTER)
-        self.tree.column("path", width=640, anchor=tk.W)
+        self.tree.column("backup", width=110, anchor=tk.CENTER)
+        self.tree.column("storage", width=120, anchor=tk.E)
+        self.tree.column("path", width=440, anchor=tk.W)
 
         yscroll = ttk.Scrollbar(table_wrap, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=yscroll.set)
@@ -220,6 +233,8 @@ class BotManagerApp:
         backups_menu.add_command(label="Show Last Backup Times", command=self.show_backup_status)
         backups_menu.add_command(label="Backup Selected Bot Now", command=self.backup_selected)
         backups_menu.add_command(label="Backup All Bots Now", command=self.backup_all_now)
+        backups_menu.add_separator()
+        backups_menu.add_command(label="Open Backup Folder", command=self.open_backup_folder)
         menubar.add_cascade(label="Backups", menu=backups_menu)
         self.root.config(menu=menubar)
 
@@ -252,25 +267,25 @@ class BotManagerApp:
         self.bots_root_var.set(self.config.bots_root)
         self.python_var.set(self.config.python_executable)
         self.interval_var.set(str(self.config.update_interval_sec))
-        self.backup_interval_var.set(str(self.config.backup_interval_sec))
+        self.backup_interval_var.set(str(self.config.backup_interval_days))
         self.auto_update_var.set(self.config.auto_update_restart)
 
     def _save_config_from_ui(self) -> None:
         interval_raw = self.interval_var.get().strip() or "120"
-        backup_interval_raw = self.backup_interval_var.get().strip() or "600"
+        backup_interval_raw = self.backup_interval_var.get().strip() or "1"
         try:
             interval = max(15, int(interval_raw))
         except ValueError:
             interval = 120
         try:
-            backup_interval = max(60, int(backup_interval_raw))
+            backup_interval_days = max(1, int(backup_interval_raw))
         except ValueError:
-            backup_interval = 600
+            backup_interval_days = 1
 
         self.config.bots_root = self.bots_root_var.get().strip()
         self.config.python_executable = self.python_var.get().strip()
         self.config.update_interval_sec = interval
-        self.config.backup_interval_sec = backup_interval
+        self.config.backup_interval_days = backup_interval_days
         self.config.auto_update_restart = bool(self.auto_update_var.get())
         self.config.save()
         self._append_log("SYSTEM", "Settings saved")
@@ -357,6 +372,8 @@ class BotManagerApp:
                 status = "Running" if bot.is_running else "Stopped"
                 git_text = "Yes" if bot.is_git_repo else "No"
                 upd = "Available" if bot.update_available else "Up-to-date"
+                backup_health = self._get_backup_health(bot.name)
+                backup_size = self._format_bytes(self._get_backup_storage_bytes(bot.name))
 
                 tag = "running" if bot.is_running else "stopped"
                 if bot.update_available:
@@ -366,7 +383,7 @@ class BotManagerApp:
                     "",
                     tk.END,
                     iid=iid,
-                    values=(status, bot.entry_file, git_text, upd, str(bot.path)),
+                    values=(status, bot.entry_file, git_text, upd, backup_health, backup_size, str(bot.path)),
                     tags=(tag,),
                 )
 
@@ -471,18 +488,45 @@ class BotManagerApp:
         for bot_name in bot_names:
             status = self.backup_status.get(bot_name, {})
             last_backup_at = float(status.get("last_backup_at", 0.0) or 0.0)
+            last_failure_at = float(status.get("last_failure_at", 0.0) or 0.0)
             last_backup_file = str(status.get("last_backup_file", ""))
             files_count = int(status.get("files_count", 0) or 0)
+            health = self._get_backup_health(bot_name)
+            storage_text = self._format_bytes(self._get_backup_storage_bytes(bot_name))
 
             if last_backup_at > 0:
                 ts = datetime.fromtimestamp(last_backup_at).strftime("%Y-%m-%d %H:%M:%S")
                 rows.append(
-                    f"{bot_name}: {ts} ({files_count} file(s))\n  Zip: {last_backup_file or 'N/A'}"
+                    f"{bot_name}: {health}, {storage_text}\n"
+                    f"  Last success: {ts} ({files_count} file(s))\n"
+                    f"  Zip: {last_backup_file or 'N/A'}"
+                )
+            elif last_failure_at > 0:
+                fail_ts = datetime.fromtimestamp(last_failure_at).strftime("%Y-%m-%d %H:%M:%S")
+                last_error = str(status.get("last_error", "Unknown error"))
+                rows.append(
+                    f"{bot_name}: Failed, {storage_text}\n"
+                    f"  Last failure: {fail_ts}\n"
+                    f"  Error: {last_error}"
                 )
             else:
-                rows.append(f"{bot_name}: No backups yet")
+                rows.append(f"{bot_name}: {health}, {storage_text}\n  No backups yet")
 
         messagebox.showinfo("Backup Status", "\n\n".join(rows))
+
+    def open_backup_folder(self) -> None:
+        BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+        try:
+            system_name = platform.system().lower()
+            if system_name == "windows":
+                os.startfile(str(BACKUP_ROOT))
+            elif system_name == "darwin":
+                subprocess.Popen(["open", str(BACKUP_ROOT)])
+            else:
+                subprocess.Popen(["xdg-open", str(BACKUP_ROOT)])
+            self._append_log("SYSTEM", f"Opened backup folder: {BACKUP_ROOT}")
+        except Exception as exc:
+            messagebox.showerror("Open Backup Folder", f"Unable to open backup folder:\n{exc}")
 
     def _python_command(self, bot: "BotInfo | None" = None) -> str:
         # 1. Per-bot venv wins (.venv or venv inside the bot folder).
@@ -696,16 +740,74 @@ class BotManagerApp:
             self.last_global_update_check = now
             threading.Thread(target=self._check_updates_worker, daemon=True).start()
 
-        backup_interval = max(60, int(self.backup_interval_var.get() or "600"))
-        if not self.backup_thread_running and now - self.last_global_backup_check >= 30:
+        backup_interval_days = self._get_backup_interval_days_from_ui()
+        backup_interval_seconds = backup_interval_days * 86400
+        if not self.backup_thread_running and now - self.last_global_backup_check >= 300:
             self.last_global_backup_check = now
-            threading.Thread(target=self._periodic_backup_worker, args=(backup_interval,), daemon=True).start()
+            threading.Thread(
+                target=self._periodic_backup_worker,
+                args=(backup_interval_seconds,),
+                daemon=True,
+            ).start()
 
         self.root.after(3000, self._periodic_update_loop)
 
     @staticmethod
     def _sanitize_name(value: str) -> str:
         return re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip()) or "bot"
+
+    def _get_backup_interval_days_from_ui(self) -> int:
+        raw = self.backup_interval_var.get().strip() or "1"
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 1
+
+    @staticmethod
+    def _format_bytes(size_bytes: int) -> str:
+        size = float(max(0, size_bytes))
+        units = ["B", "KB", "MB", "GB", "TB"]
+        unit_idx = 0
+        while size >= 1024 and unit_idx < len(units) - 1:
+            size /= 1024
+            unit_idx += 1
+        if unit_idx == 0:
+            return f"{int(size)} {units[unit_idx]}"
+        return f"{size:.2f} {units[unit_idx]}"
+
+    def _get_backup_storage_bytes(self, bot_name: str) -> int:
+        safe_bot_name = self._sanitize_name(bot_name)
+        bot_backup_dir = BACKUP_ROOT / safe_bot_name
+        if not bot_backup_dir.exists() or not bot_backup_dir.is_dir():
+            return 0
+
+        total = 0
+        for file_path in bot_backup_dir.rglob("*.zip"):
+            try:
+                total += file_path.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def _get_backup_health(self, bot_name: str) -> str:
+        status = self.backup_status.get(bot_name, {})
+        last_success_at = float(status.get("last_backup_at", 0.0) or 0.0)
+        last_failure_at = float(status.get("last_failure_at", 0.0) or 0.0)
+
+        if last_failure_at > last_success_at:
+            return "Failed"
+        if last_success_at <= 0:
+            return "Overdue"
+
+        now = time.time()
+        interval_seconds = self._get_backup_interval_days_from_ui() * 86400
+        age = max(0.0, now - last_success_at)
+
+        if age >= interval_seconds:
+            return "Overdue"
+        if age >= interval_seconds * 0.8:
+            return "Due Soon"
+        return "Healthy"
 
     def _load_backup_status(self) -> dict[str, dict[str, object]]:
         if not BACKUP_STATUS_PATH.exists():
@@ -722,7 +824,7 @@ class BotManagerApp:
         BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
         BACKUP_STATUS_PATH.write_text(json.dumps(self.backup_status, indent=2), encoding="utf-8")
 
-    def _periodic_backup_worker(self, backup_interval: int) -> None:
+    def _periodic_backup_worker(self, backup_interval_seconds: int) -> None:
         self.backup_thread_running = True
         try:
             now = time.time()
@@ -732,7 +834,7 @@ class BotManagerApp:
             for bot_name in bot_names:
                 status = self.backup_status.get(bot_name, {})
                 last_backup = float(status.get("last_backup_at", 0.0) or 0.0)
-                if now - last_backup >= backup_interval:
+                if now - last_backup >= backup_interval_seconds:
                     self._start_backup_job(bot_name, reason="scheduled")
         finally:
             self.backup_thread_running = False
@@ -769,11 +871,15 @@ class BotManagerApp:
 
             now = time.time()
             bot.last_backup_at = now
+            previous = self.backup_status.get(bot.name, {})
             self.backup_status[bot.name] = {
                 "last_backup_at": now,
                 "last_backup_file": str(zip_path),
                 "files_count": len(files),
                 "reason": reason,
+                "last_result": "success",
+                "last_failure_at": float(previous.get("last_failure_at", 0.0) or 0.0),
+                "last_error": "",
             }
             self._save_backup_status()
 
@@ -782,6 +888,17 @@ class BotManagerApp:
                 f"Backup complete: {zip_path.name} ({len(files)} file(s), reason={reason})",
             )
         except Exception as exc:
+            previous = self.backup_status.get(bot_name, {})
+            self.backup_status[bot_name] = {
+                "last_backup_at": float(previous.get("last_backup_at", 0.0) or 0.0),
+                "last_backup_file": str(previous.get("last_backup_file", "")),
+                "files_count": int(previous.get("files_count", 0) or 0),
+                "reason": reason,
+                "last_result": "failed",
+                "last_failure_at": time.time(),
+                "last_error": str(exc),
+            }
+            self._save_backup_status()
             self._append_log(bot_name, f"Backup failed: {exc}")
         finally:
             self.backup_jobs_in_progress.discard(bot_name)

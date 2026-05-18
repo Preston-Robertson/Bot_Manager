@@ -2,6 +2,6 @@
   "bots_root": "",
   "python_executable": "",
   "update_interval_sec": 120,
-  "backup_interval_sec": 600,
+  "backup_interval_days": 1,
   "auto_update_restart": true
 }
