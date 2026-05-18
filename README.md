@@ -100,32 +100,4 @@ Bot_Manager/
 └── README.md
 ```
 
-## Publishing to the `main` branch
-
-From the `Bot_Manager` folder:
-
-```powershell
-git checkout -b main
-git add .
-git commit -m "Initial commit: Discord Bot Manager"
-git remote add origin https://github.com/<your-user>/<your-repo>.git
-git push -u origin main
-```
-
-If a `master` branch already exists and you want `main` instead:
-
-```powershell
-git branch -m master main
-git push -u origin main
-```
-
-## Roadmap
-
-- Per-bot custom entry file override
-- Optional startup profiles (auto-launch selected bots on open)
-- System tray support for headless server use
-
-## License
-
-MIT
 
