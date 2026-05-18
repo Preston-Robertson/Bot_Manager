@@ -23,3 +23,6 @@ stderr.txt
 
 # Local user config (contains absolute paths)
 manager_config.json
+
+# Local bot backup archives and status
+bot_data/

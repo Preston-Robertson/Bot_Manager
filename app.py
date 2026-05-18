@@ -1,17 +1,38 @@
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
 import time
+import zipfile
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 CONFIG_PATH = Path(__file__).with_name("manager_config.json")
+BACKUP_ROOT = Path(__file__).with_name("bot_data")
+BACKUP_STATUS_PATH = BACKUP_ROOT / "backup_status.json"
 ENTRY_CANDIDATES = ["main.py", "bot.py", "run.py", "app.py"]
+BACKUP_FILE_EXTENSIONS = {
+    ".csv",
+    ".db",
+    ".db3",
+    ".json",
+    ".pkl",
+    ".pickle",
+    ".sqlite",
+    ".sqlite3",
+    ".xls",
+    ".xlsm",
+    ".xlsx",
+    ".yaml",
+    ".yml",
+}
+BACKUP_EXCLUDED_DIRS = {".git", ".venv", "venv", "env", "__pycache__", "node_modules"}
 
 
 @dataclass
@@ -22,6 +43,7 @@ class BotInfo:
     is_git_repo: bool
     update_available: bool = False
     last_update_check: float = 0.0
+    last_backup_at: float = 0.0
     process: subprocess.Popen | None = None
     process_reader: threading.Thread | None = None
 
@@ -35,6 +57,7 @@ class AppConfig:
     bots_root: str = ""
     python_executable: str = ""
     update_interval_sec: int = 120
+    backup_interval_sec: int = 600
     auto_update_restart: bool = True
 
     @classmethod
@@ -47,6 +70,7 @@ class AppConfig:
                 bots_root=str(data.get("bots_root", "")),
                 python_executable=str(data.get("python_executable", "")),
                 update_interval_sec=int(data.get("update_interval_sec", 120)),
+                backup_interval_sec=int(data.get("backup_interval_sec", 600)),
                 auto_update_restart=bool(data.get("auto_update_restart", True)),
             )
         except Exception:
@@ -57,6 +81,7 @@ class AppConfig:
             "bots_root": self.bots_root,
             "python_executable": self.python_executable,
             "update_interval_sec": self.update_interval_sec,
+            "backup_interval_sec": self.backup_interval_sec,
             "auto_update_restart": self.auto_update_restart,
         }
         CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -75,7 +100,11 @@ class BotManagerApp:
 
         self.log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.last_global_update_check = 0.0
+        self.last_global_backup_check = 0.0
         self.update_thread_running = False
+        self.backup_thread_running = False
+        self.backup_jobs_in_progress: set[str] = set()
+        self.backup_status = self._load_backup_status()
 
         self.selected_bot_name: str | None = None
 
@@ -114,6 +143,11 @@ class BotManagerApp:
         self.interval_entry = ttk.Entry(options, textvariable=self.interval_var, width=8)
         self.interval_entry.pack(side=tk.LEFT, padx=(8, 12))
 
+        ttk.Label(options, text="Backup Interval (sec):").pack(side=tk.LEFT)
+        self.backup_interval_var = tk.StringVar(value="600")
+        self.backup_interval_entry = ttk.Entry(options, textvariable=self.backup_interval_var, width=8)
+        self.backup_interval_entry.pack(side=tk.LEFT, padx=(8, 12))
+
         self.auto_update_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             options,
@@ -149,6 +183,7 @@ class BotManagerApp:
         ttk.Button(actions, text="Restart", command=self.restart_selected).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(actions, text="Update Now", command=self.update_selected).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(actions, text="Check Updates", command=self.check_updates_now).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(actions, text="Backup Now", command=self.backup_selected).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(actions, text="Save Settings", command=self._save_config_from_ui).pack(side=tk.RIGHT)
 
         table_wrap = ttk.Frame(upper)
@@ -180,6 +215,14 @@ class BotManagerApp:
         self.log_text.pack(fill=tk.BOTH, expand=True)
         self.log_text.configure(state=tk.DISABLED)
 
+        menubar = tk.Menu(self.root)
+        backups_menu = tk.Menu(menubar, tearoff=0)
+        backups_menu.add_command(label="Show Last Backup Times", command=self.show_backup_status)
+        backups_menu.add_command(label="Backup Selected Bot Now", command=self.backup_selected)
+        backups_menu.add_command(label="Backup All Bots Now", command=self.backup_all_now)
+        menubar.add_cascade(label="Backups", menu=backups_menu)
+        self.root.config(menu=menubar)
+
     def _apply_theme(self) -> None:
         style = ttk.Style(self.root)
         if "clam" in style.theme_names():
@@ -209,18 +252,25 @@ class BotManagerApp:
         self.bots_root_var.set(self.config.bots_root)
         self.python_var.set(self.config.python_executable)
         self.interval_var.set(str(self.config.update_interval_sec))
+        self.backup_interval_var.set(str(self.config.backup_interval_sec))
         self.auto_update_var.set(self.config.auto_update_restart)
 
     def _save_config_from_ui(self) -> None:
         interval_raw = self.interval_var.get().strip() or "120"
+        backup_interval_raw = self.backup_interval_var.get().strip() or "600"
         try:
             interval = max(15, int(interval_raw))
         except ValueError:
             interval = 120
+        try:
+            backup_interval = max(60, int(backup_interval_raw))
+        except ValueError:
+            backup_interval = 600
 
         self.config.bots_root = self.bots_root_var.get().strip()
         self.config.python_executable = self.python_var.get().strip()
         self.config.update_interval_sec = interval
+        self.config.backup_interval_sec = backup_interval
         self.config.auto_update_restart = bool(self.auto_update_var.get())
         self.config.save()
         self._append_log("SYSTEM", "Settings saved")
@@ -270,6 +320,12 @@ class BotManagerApp:
                 bot.process_reader = existing.process_reader
                 bot.update_available = existing.update_available
                 bot.last_update_check = existing.last_update_check
+
+            status = self.backup_status.get(bot.name, {})
+            try:
+                bot.last_backup_at = float(status.get("last_backup_at", 0.0))
+            except (TypeError, ValueError):
+                bot.last_backup_at = 0.0
 
             discovered[bot.name] = bot
 
@@ -381,6 +437,46 @@ class BotManagerApp:
         if self.update_thread_running:
             return
         threading.Thread(target=self._check_updates_worker, daemon=True).start()
+
+    def backup_selected(self) -> None:
+        bot = self._get_selected_bot()
+        if not bot:
+            return
+        self._start_backup_job(bot.name, reason="manual")
+
+    def backup_all_now(self) -> None:
+        with self.bots_lock:
+            bot_names = sorted(self.bots.keys())
+        if not bot_names:
+            self._append_log("SYSTEM", "No bots found to back up")
+            return
+        for bot_name in bot_names:
+            self._start_backup_job(bot_name, reason="manual")
+
+    def show_backup_status(self) -> None:
+        rows: list[str] = []
+        with self.bots_lock:
+            bot_names = sorted(self.bots.keys())
+
+        if not bot_names:
+            messagebox.showinfo("Backup Status", "No bots discovered yet. Scan bots first.")
+            return
+
+        for bot_name in bot_names:
+            status = self.backup_status.get(bot_name, {})
+            last_backup_at = float(status.get("last_backup_at", 0.0) or 0.0)
+            last_backup_file = str(status.get("last_backup_file", ""))
+            files_count = int(status.get("files_count", 0) or 0)
+
+            if last_backup_at > 0:
+                ts = datetime.fromtimestamp(last_backup_at).strftime("%Y-%m-%d %H:%M:%S")
+                rows.append(
+                    f"{bot_name}: {ts} ({files_count} file(s))\n  Zip: {last_backup_file or 'N/A'}"
+                )
+            else:
+                rows.append(f"{bot_name}: No backups yet")
+
+        messagebox.showinfo("Backup Status", "\n\n".join(rows))
 
     def _python_command(self, bot: "BotInfo | None" = None) -> str:
         # 1. Per-bot venv wins (.venv or venv inside the bot folder).
@@ -594,7 +690,111 @@ class BotManagerApp:
             self.last_global_update_check = now
             threading.Thread(target=self._check_updates_worker, daemon=True).start()
 
+        backup_interval = max(60, int(self.backup_interval_var.get() or "600"))
+        if not self.backup_thread_running and now - self.last_global_backup_check >= 30:
+            self.last_global_backup_check = now
+            threading.Thread(target=self._periodic_backup_worker, args=(backup_interval,), daemon=True).start()
+
         self.root.after(3000, self._periodic_update_loop)
+
+    @staticmethod
+    def _sanitize_name(value: str) -> str:
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip()) or "bot"
+
+    def _load_backup_status(self) -> dict[str, dict[str, object]]:
+        if not BACKUP_STATUS_PATH.exists():
+            return {}
+        try:
+            data = json.loads(BACKUP_STATUS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_backup_status(self) -> None:
+        BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+        BACKUP_STATUS_PATH.write_text(json.dumps(self.backup_status, indent=2), encoding="utf-8")
+
+    def _periodic_backup_worker(self, backup_interval: int) -> None:
+        self.backup_thread_running = True
+        try:
+            now = time.time()
+            with self.bots_lock:
+                bot_names = sorted(self.bots.keys())
+
+            for bot_name in bot_names:
+                status = self.backup_status.get(bot_name, {})
+                last_backup = float(status.get("last_backup_at", 0.0) or 0.0)
+                if now - last_backup >= backup_interval:
+                    self._start_backup_job(bot_name, reason="scheduled")
+        finally:
+            self.backup_thread_running = False
+
+    def _start_backup_job(self, bot_name: str, reason: str) -> None:
+        if bot_name in self.backup_jobs_in_progress:
+            return
+        self.backup_jobs_in_progress.add(bot_name)
+        threading.Thread(target=self._backup_bot_worker, args=(bot_name, reason), daemon=True).start()
+
+    def _backup_bot_worker(self, bot_name: str, reason: str) -> None:
+        try:
+            with self.bots_lock:
+                bot = self.bots.get(bot_name)
+            if not bot:
+                return
+
+            files = self._find_backup_files(bot.path)
+            if not files:
+                self._append_log(bot.name, "Backup skipped: no matching data files found")
+                return
+
+            safe_bot_name = self._sanitize_name(bot.name)
+            target_dir = BACKUP_ROOT / safe_bot_name
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            zip_path = target_dir / f"{safe_bot_name}_{timestamp}.zip"
+
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for file_path in files:
+                    rel = file_path.relative_to(bot.path)
+                    zf.write(file_path, arcname=str(rel))
+
+            now = time.time()
+            bot.last_backup_at = now
+            self.backup_status[bot.name] = {
+                "last_backup_at": now,
+                "last_backup_file": str(zip_path),
+                "files_count": len(files),
+                "reason": reason,
+            }
+            self._save_backup_status()
+
+            self._append_log(
+                bot.name,
+                f"Backup complete: {zip_path.name} ({len(files)} file(s), reason={reason})",
+            )
+        except Exception as exc:
+            self._append_log(bot_name, f"Backup failed: {exc}")
+        finally:
+            self.backup_jobs_in_progress.discard(bot_name)
+
+    def _find_backup_files(self, bot_root: Path) -> list[Path]:
+        matches: list[Path] = []
+
+        for path in bot_root.rglob("*"):
+            if not path.is_file():
+                continue
+
+            # Skip known heavy or irrelevant folders while scanning recursively.
+            if any(part in BACKUP_EXCLUDED_DIRS for part in path.parts):
+                continue
+
+            if path.suffix.lower() in BACKUP_FILE_EXTENSIONS:
+                matches.append(path)
+
+        return sorted(matches)
 
     def _on_close(self) -> None:
         running_bots: list[BotInfo] = []

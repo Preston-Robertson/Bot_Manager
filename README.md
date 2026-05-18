@@ -10,6 +10,8 @@ A lightweight desktop GUI to discover, run, update, and restart Python Discord b
 - One-click **Start Bot / Stop Bot** toggle plus **Restart**
 - Periodic git update checks against `origin/main`
 - **Auto update + restart**: pulls `main` and restarts running bots when changes are detected
+- Scheduled per-bot data backups into local zip archives (stored in a gitignored folder)
+- Backup status menu to view the last successful backup time per bot
 - Live, per-bot log stream in the GUI
 - Settings persisted to `manager_config.json`
 
@@ -46,6 +48,14 @@ In the GUI:
 2. Click **Scan Bots**.
 3. Select a bot, then use **Start Bot / Stop Bot**, **Restart**, **Update Now**, or **Check Updates**.
 
+Backups:
+
+1. Set **Backup Interval (sec)** to choose how often backups run.
+2. Use **Backup Now** for immediate backups from the main action bar.
+3. Use the **Backups** menu to see last backup times, back up selected bot now, or back up all bots now.
+
+Backups are saved under `bot_data/<bot_name>/` as timestamped `.zip` files and are kept until you manually delete them.
+
 ### How a folder is treated as a bot
 
 A folder qualifies as a bot if its root contains one of:
@@ -76,6 +86,7 @@ User settings are stored in `manager_config.json` (gitignored). A template is pr
   "bots_root": "",
   "python_executable": "",
   "update_interval_sec": 120,
+  "backup_interval_sec": 600,
   "auto_update_restart": true
 }
 ```
@@ -96,6 +107,7 @@ Bot_Manager/
 ├── run_manager.bat              # Windows launcher
 ├── manager_config.example.json  # Template settings (manager_config.json is gitignored)
 ├── requirements.txt             # (stdlib only)
+├── bot_data/                    # Local backup archives + backup status (gitignored)
 ├── .gitignore
 └── README.md
 ```
@@ -119,13 +131,4 @@ git branch -m master main
 git push -u origin main
 ```
 
-## Roadmap
-
-- Per-bot custom entry file override
-- Optional startup profiles (auto-launch selected bots on open)
-- System tray support for headless server use
-
-## License
-
-MIT
 
