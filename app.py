@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 CONFIG_PATH = Path(__file__).with_name("manager_config.json")
 BACKUP_ROOT = Path(__file__).with_name("bot_data")
 BACKUP_STATUS_PATH = BACKUP_ROOT / "backup_status.json"
-ENTRY_CANDIDATES = ["main.py", "bot.py", "run.py", "app.py"]
+ENTRY_CANDIDATES = ["main.py", "bot.py", "run.py"]
 BACKUP_FILE_EXTENSIONS = {
     ".csv",
     ".db",
