@@ -726,6 +726,7 @@ class BotManager:
             "head": "",
             "head_short": "",
             "dirty": False,
+            "dirty_files": [],
             "update_available": False,
             "ahead": 0,
             "behind": 0,
@@ -747,6 +748,19 @@ class BotManager:
         ok, out = self._run_git(MANAGER_DIR, ["status", "--porcelain"])
         if ok:
             info["dirty"] = bool(out.strip())
+            # Porcelain lines look like "XY path" or "XY orig -> new" (rename).
+            # Take everything after the 2-char status code, strip leading space,
+            # then keep only the destination side of a rename. Cap the list so we
+            # don't ship huge payloads.
+            files: list[str] = []
+            for line in out.splitlines():
+                stripped = line[2:].lstrip()
+                if not stripped:
+                    continue
+                if " -> " in stripped:
+                    stripped = stripped.split(" -> ", 1)[1]
+                files.append(stripped)
+            info["dirty_files"] = files[:50]
         ok, out = self._run_git(MANAGER_DIR, ["config", "--get", "remote.origin.url"])
         if ok:
             info["remote"] = out.strip()
@@ -791,25 +805,49 @@ class BotManager:
             self.log("MANAGER", f"Self-update check: up to date (origin/{branch})")
         return status
 
-    def update_manager(self) -> tuple[bool, str]:
-        """git pull --ff-only the manager itself. Caller decides whether to restart."""
+    def update_manager(self, *, force: bool = False) -> tuple[bool, str]:
+        """git pull --ff-only the manager itself. Caller decides whether to restart.
+
+        When ``force=True`` and the working tree is dirty, local changes are
+        stashed (including untracked files) before the pull. The stash is
+        preserved so nothing is destroyed; recover with ``git stash list`` and
+        ``git stash pop`` from a shell if needed.
+        """
         if not self._manager_is_git_repo():
             return False, "Manager directory is not a git checkout"
         status = self.manager_status()
+        stashed = False
         if status["dirty"]:
-            return (
-                False,
-                "Manager working tree has uncommitted changes; refusing to update",
+            if not force:
+                return (
+                    False,
+                    "Manager working tree has uncommitted changes; refusing to update",
+                )
+            stash_msg = f"botmgr auto-stash {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            ok, out = self._run_git(
+                MANAGER_DIR, ["stash", "push", "-u", "-m", stash_msg], timeout=60
             )
+            if not ok:
+                self.log("MANAGER", f"Self-update stash failed: {out}")
+                return False, f"git stash failed: {out or 'unknown error'}"
+            stashed = True
+            self.log("MANAGER", f"Stashed local changes before update: {stash_msg}")
         branch = status["branch"] or "main"
         ok, out = self._run_git(
             MANAGER_DIR, ["pull", "origin", branch, "--ff-only"], timeout=120
         )
         if not ok:
             self.log("MANAGER", f"Self-update failed: {out}")
-            return False, out or "git pull failed"
-        self.log("MANAGER", f"Self-update applied from origin/{branch}")
-        return True, "Manager updated. Restart to apply the new code."
+            hint = " Local changes are preserved in `git stash`." if stashed else ""
+            return False, (out or "git pull failed") + hint
+        msg = f"Self-update applied from origin/{branch}"
+        if stashed:
+            msg += " (local changes preserved in stash)"
+        self.log("MANAGER", msg)
+        user_msg = "Manager updated. Restart to apply the new code."
+        if stashed:
+            user_msg += " Local changes were stashed; use `git stash list` on the host to inspect."
+        return True, user_msg
 
     def restart_manager(self) -> tuple[bool, str]:
         """Stop running bots, persist config, then re-exec this Python process."""

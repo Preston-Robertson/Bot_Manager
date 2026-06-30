@@ -342,6 +342,8 @@ td.empty { text-align: center; color: var(--muted); padding: 24px; }
 .danger { background: var(--danger); color: #fff; border: none; }
 .danger:hover { background: var(--danger-hover); }
 .danger:disabled { background: var(--danger-disabled); cursor: not-allowed; }
+.warn { background: var(--badge-warn-bg); color: var(--due-soon); border: 1px solid var(--due-soon); }
+.warn:hover { filter: brightness(1.1); }
 .hidden { display: none !important; }
 
 .logs-header {

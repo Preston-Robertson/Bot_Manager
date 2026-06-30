@@ -200,7 +200,15 @@ async def manager_check_update(request: Request):
 @app.post("/api/manager/update", dependencies=[AuthDep])
 async def manager_update(request: Request):
     manager = get_manager(request)
-    ok, msg = await run_in_threadpool(manager.update_manager)
+    force = False
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            force = bool(body.get("force", False))
+    except Exception:
+        # No body / not JSON — treat as a normal (non-force) update.
+        pass
+    ok, msg = await run_in_threadpool(manager.update_manager, force=force)
     info = manager.manager_status()
     if not ok:
         return JSONResponse(

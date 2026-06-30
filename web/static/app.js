@@ -280,8 +280,10 @@ function renderManagerInfo(info) {
   const commit = document.getElementById("mgrCommit");
   const text = document.getElementById("mgrUpdateText");
   const lastCheck = document.getElementById("mgrLastCheck");
-  const updateBtn = document.getElementById("mgrUpdateBtn");
+  const updateBtn = document.getElementById("mgrUpdateBtn");  const forceBtn = document.getElementById("mgrForceUpdateBtn");
 
+  // Default: hide force button; renderers below decide when to show it.
+  forceBtn.classList.add("hidden");
   if (!info || !info.is_git_repo) {
     badge.textContent = "not a git checkout";
     badge.className = "badge badge-neutral";
@@ -303,7 +305,18 @@ function renderManagerInfo(info) {
   if (info.update_available) {
     badge.textContent = `${info.behind} commit(s) behind`;
     badge.className = "badge badge-update";
-    text.textContent = `An update is available on origin/${info.branch}. Click "Update Manager" to pull, then "Restart Manager" to apply.`;
+    if (info.dirty) {
+      const files = Array.isArray(info.dirty_files) ? info.dirty_files : [];
+      const preview = files.length
+        ? ` Dirty: ${files.slice(0, 5).join(", ")}${files.length > 5 ? `, +${files.length - 5} more` : ""}.`
+        : "";
+      text.textContent =
+        `An update is available on origin/${info.branch}, but the manager working tree has uncommitted changes.${preview} ` +
+        `Use "Force Update" to stash local changes and pull, or clean the tree on the host and re-check.`;
+      forceBtn.classList.remove("hidden");
+    } else {
+      text.textContent = `An update is available on origin/${info.branch}. Click "Update Manager" to pull, then "Restart Manager" to apply.`;
+    }
     updateBtn.disabled = !!info.dirty;
   } else {
     badge.textContent = "up to date";
@@ -354,6 +367,24 @@ async function mgrUpdate() {
     toast(res.message || "Manager updated");
   } catch (err) {
     toast(`Update failed: ${err.message}`, "error");
+  }
+}
+
+async function mgrForceUpdate() {
+  if (!confirm(
+    "Force update will stash any local changes in the manager working tree, then pull. " +
+    "Your local edits are preserved in `git stash` on the host (recover with `git stash list` / `git stash pop`). " +
+    "Continue?"
+  )) return;
+  try {
+    const res = await api("/api/manager/update", {
+      method: "POST",
+      body: JSON.stringify({ force: true }),
+    });
+    renderManagerInfo(res.manager);
+    toast(res.message || "Manager updated (forced)");
+  } catch (err) {
+    toast(`Force update failed: ${err.message}`, "error");
   }
 }
 
@@ -831,6 +862,7 @@ function bindEvents() {
     });
   }
   document.getElementById("mgrUpdateBtn").addEventListener("click", mgrUpdate);
+  document.getElementById("mgrForceUpdateBtn").addEventListener("click", mgrForceUpdate);
   document.getElementById("mgrRestartBtn").addEventListener("click", mgrRestart);
   document.getElementById("clearLogsBtn").addEventListener("click", () => { logsEl.textContent = ""; });
   document.getElementById("modalCloseBtn").addEventListener("click", closeModal);
