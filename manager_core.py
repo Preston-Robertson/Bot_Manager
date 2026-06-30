@@ -20,9 +20,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable
 
+try:
+    import psutil  # type: ignore
+except ImportError:  # pragma: no cover
+    psutil = None  # health metrics degrade gracefully when missing
+
 CONFIG_PATH = Path(__file__).with_name("manager_config.json")
 BACKUP_ROOT = Path(__file__).with_name("bot_data")
 BACKUP_STATUS_PATH = BACKUP_ROOT / "backup_status.json"
+BOT_SETTINGS_PATH = BACKUP_ROOT / "bot_settings.json"
 MANAGER_DIR = Path(__file__).resolve().parent
 
 ENTRY_CANDIDATES = ["main.py", "bot.py", "run.py", "app.py"]
@@ -58,6 +64,31 @@ EDITABLE_CONFIG_EXTENSIONS = {
 }
 EDITABLE_FILE_MAX_BYTES = 1_000_000  # 1 MB cap; bigger files are not config
 
+# Binary file-types accepted by the upload endpoint. These are listed in the
+# file panel (read-only — the text editor won't open them) and persisted into
+# the bot folder. Pickle deserialization is unsafe; only the authenticated
+# dashboard user can place these files, and nothing here auto-loads them.
+UPLOADABLE_FILE_EXTENSIONS = {
+    ".csv",
+    ".db",
+    ".db3",
+    ".pickle",
+    ".pkl",
+    ".sqlite",
+    ".sqlite3",
+    ".xls",
+    ".xlsm",
+    ".xlsx",
+}
+UPLOAD_FILE_MAX_BYTES = 25_000_000  # 25 MB cap for binary uploads
+
+# Crash-restart policy: how many crashes inside a sliding window count as a
+# "restart loop" — once exceeded, the manager stops auto-restarting that bot
+# until the user starts it again manually.
+CRASH_RESTART_WINDOW_SEC = 600  # 10 minutes
+CRASH_RESTART_MAX_ATTEMPTS = 3
+CRASH_RESTART_DELAY_SEC = 2.0
+
 LOG_BUFFER_SIZE = 2000
 SCHEDULER_TICK_SEC = 3.0
 STATUS_REAPER_TICK_SEC = 1.0
@@ -87,6 +118,11 @@ class BotInfo:
     last_backup_at: float = 0.0
     process: subprocess.Popen | None = None
     process_reader: threading.Thread | None = None
+    # Auto-restart this bot if its subprocess exits non-zero.
+    restart_on_crash: bool = False
+    # Internal: set just before we deliberately stop the bot so the crash
+    # detector doesn't treat the SIGTERM exit as a crash.
+    _stop_requested: bool = False
 
     @property
     def is_running(self) -> bool:
@@ -97,7 +133,9 @@ class BotInfo:
 class AppConfig:
     bots_root: str = ""
     python_executable: str = ""
-    update_interval_sec: int = 120
+    # Update checks fetch from origin per bot + the manager — kept daily by default
+    # so the log isn't dominated by routine "up to date" entries.
+    update_interval_sec: int = 86_400
     backup_interval_days: int = 1
     auto_update_restart: bool = True
 
@@ -117,7 +155,7 @@ class AppConfig:
             return cls(
                 bots_root=str(data.get("bots_root", "")),
                 python_executable=str(data.get("python_executable", "")),
-                update_interval_sec=max(15, int(data.get("update_interval_sec", 120))),
+                update_interval_sec=max(60, int(data.get("update_interval_sec", 86_400))),
                 backup_interval_days=backup_interval_days,
                 auto_update_restart=bool(data.get("auto_update_restart", True)),
             )
@@ -180,6 +218,13 @@ class BotManager:
         self._backup_jobs_in_progress: set[str] = set()
 
         self.backup_status = self._load_backup_status()
+        # Per-bot settings persisted to disk (currently just restart_on_crash).
+        self.bot_settings: dict[str, dict[str, object]] = self._load_bot_settings()
+        # psutil.Process per bot, cached so cpu_percent() can compute a delta
+        # across snapshots. Keyed by bot name; cleared when a bot stops.
+        self._psutil_procs: dict[str, "psutil.Process"] = {}
+        # Sliding-window crash timestamps per bot for the restart-loop guard.
+        self._crash_history: dict[str, deque[float]] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -259,9 +304,9 @@ class BotManager:
             self.config.python_executable = str(fields["python_executable"] or "").strip()
         if "update_interval_sec" in fields:
             try:
-                self.config.update_interval_sec = max(15, int(fields["update_interval_sec"]))
+                self.config.update_interval_sec = max(60, int(fields["update_interval_sec"]))
             except (TypeError, ValueError):
-                self.config.update_interval_sec = 120
+                self.config.update_interval_sec = 86_400
         if "backup_interval_days" in fields:
             try:
                 self.config.backup_interval_days = max(1, int(fields["backup_interval_days"]))
@@ -329,6 +374,10 @@ class BotManager:
                 bot.last_backup_at = float(status.get("last_backup_at", 0.0))
             except (TypeError, ValueError):
                 bot.last_backup_at = 0.0
+
+            # Restore persisted per-bot settings.
+            settings = self.bot_settings.get(bot.name, {})
+            bot.restart_on_crash = bool(settings.get("restart_on_crash", False))
 
             discovered[bot.name] = bot
 
@@ -422,6 +471,16 @@ class BotManager:
             return
 
         bot.process = process
+        bot._stop_requested = False
+        # Seed the psutil handle so cpu_percent() has a baseline for the next
+        # snapshot. psutil is optional; missing it just disables health metrics.
+        if psutil is not None:
+            try:
+                proc = psutil.Process(process.pid)
+                proc.cpu_percent(interval=None)  # prime the delta
+                self._psutil_procs[bot.name] = proc
+            except Exception:
+                self._psutil_procs.pop(bot.name, None)
         reader = threading.Thread(
             target=self._read_process_output,
             args=(bot.name, process),
@@ -437,6 +496,7 @@ class BotManager:
             return
 
         assert bot.process is not None
+        bot._stop_requested = True
         bot.process.terminate()
         try:
             bot.process.wait(timeout=10)
@@ -445,6 +505,7 @@ class BotManager:
 
         bot.process = None
         bot.process_reader = None
+        self._psutil_procs.pop(bot.name, None)
         self.log(bot.name, "Stopped")
 
     def _restart_bot(self, bot: BotInfo) -> None:
@@ -461,7 +522,91 @@ class BotManager:
         except Exception as exc:
             self.log(bot_name, f"Log stream error: {exc}")
         finally:
-            self.log(bot_name, "Process exited")
+            # Wait briefly so `returncode` is populated even if the stream
+            # closed before the OS marked the process as exited.
+            rc = process.poll()
+            if rc is None:
+                try:
+                    process.wait(timeout=2)
+                    rc = process.returncode
+                except Exception:
+                    rc = None
+            self._on_process_exit(bot_name, rc)
+
+    def _on_process_exit(self, bot_name: str, returncode: int | None) -> None:
+        """Log the exit and, if configured, schedule a bounded auto-restart.
+
+        On Linux a SIGTERM exit shows up as a negative returncode (e.g. -15),
+        which we treat as a crash unless the manager set `_stop_requested`
+        on the bot just before calling .terminate().
+        """
+        with self.bots_lock:
+            bot = self.bots.get(bot_name)
+
+        if returncode is None:
+            self.log(bot_name, "Process exited (returncode unknown)")
+            crashed = False
+        elif returncode == 0:
+            self.log(bot_name, "Process exited cleanly")
+            crashed = False
+        else:
+            crashed = bot is not None and not bot._stop_requested
+            if crashed:
+                self.log(bot_name, f"Process crashed (exit code {returncode})")
+            else:
+                self.log(bot_name, f"Process exited (signal/exit code {returncode})")
+
+        # Reset the stop flag for the next start cycle.
+        if bot is not None:
+            bot._stop_requested = False
+
+        if crashed and bot is not None and bot.restart_on_crash and not self._stop_event.is_set():
+            self._handle_crash_restart(bot)
+
+    def _handle_crash_restart(self, bot: BotInfo) -> None:
+        """Auto-restart a crashed bot, capped at N attempts inside a sliding window."""
+        now = time.time()
+        history = self._crash_history.setdefault(bot.name, deque())
+        # Prune entries that fell out of the window.
+        cutoff = now - CRASH_RESTART_WINDOW_SEC
+        while history and history[0] < cutoff:
+            history.popleft()
+        history.append(now)
+
+        if len(history) > CRASH_RESTART_MAX_ATTEMPTS:
+            self.log(
+                bot.name,
+                (
+                    f"Restart loop detected ({len(history)} crashes in "
+                    f"{CRASH_RESTART_WINDOW_SEC // 60} min). Auto-restart disabled "
+                    "until manual start."
+                ),
+            )
+            # Stop the runaway loop; user must start the bot themselves.
+            bot.restart_on_crash = False
+            self.bot_settings.setdefault(bot.name, {})["restart_on_crash"] = False
+            try:
+                self._save_bot_settings()
+            except OSError:
+                pass
+            return
+
+        attempt = len(history)
+        self.log(
+            bot.name,
+            f"Auto-restart in {CRASH_RESTART_DELAY_SEC:.0f}s (attempt {attempt}/{CRASH_RESTART_MAX_ATTEMPTS})",
+        )
+        # Daemon thread so a shutdown can race ahead without blocking.
+        def _delayed_restart() -> None:
+            if self._stop_event.wait(CRASH_RESTART_DELAY_SEC):
+                return  # manager is shutting down
+            with self.bots_lock:
+                live = self.bots.get(bot.name)
+            if live is None or live.is_running:
+                return
+            self._start_bot(live)
+
+        threading.Thread(target=_delayed_restart, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Git updates
@@ -507,8 +652,8 @@ class BotManager:
                     self.log(bot.name, "Update detected on origin/main")
                     if self.config.auto_update_restart:
                         self._update_bot_worker(bot.name, silent=True)
-                else:
-                    self.log(bot.name, "No update")
+                # No log on the "no update" path — that was the main source of
+                # routine noise in the log stream.
 
             # Piggyback the manager self-update check on the same cadence.
             # We only *check* automatically; applying + restart is always manual.
@@ -910,6 +1055,33 @@ class BotManager:
         return cls._is_editable_filename(parts[-1])
 
     @staticmethod
+    def _is_uploadable_filename(name: str) -> bool:
+        """True if `name` is a single-segment filename allowed via the upload endpoint."""
+        if not name:
+            return False
+        if "/" in name or "\\" in name or ".." in name:
+            return False
+        if name in BACKUP_EXCLUDED_DIRS:
+            return False
+        suffix = Path(name).suffix.lower()
+        return suffix in UPLOADABLE_FILE_EXTENSIONS
+
+    @classmethod
+    def _is_uploadable_path(cls, rel_path: str) -> bool:
+        """True if `rel_path` is a forward-slash subpath ending in an uploadable filename."""
+        if not rel_path or "\\" in rel_path:
+            return False
+        parts = rel_path.split("/")
+        for p in parts[:-1]:
+            if not p or p in (".", ".."):
+                return False
+            if p in BACKUP_EXCLUDED_DIRS:
+                return False
+            if ":" in p or not _FOLDER_NAME_RE.match(p):
+                return False
+        return cls._is_uploadable_filename(parts[-1])
+
+    @staticmethod
     def _is_safe_folder_path(rel_path: str) -> bool:
         """True if `rel_path` is a forward-slash folder path with safe segments."""
         if not rel_path or "\\" in rel_path:
@@ -944,6 +1116,34 @@ class BotManager:
             return None
         return candidate
 
+    def _resolve_bot_upload_path(self, bot_name: str, file_path: str) -> Path | None:
+        """Return the absolute path for an uploadable (binary) file inside a bot folder.
+
+        Mirrors `_resolve_bot_file` but uses the uploadable extension list.
+        """
+        with self.bots_lock:
+            bot = self.bots.get(bot_name)
+        if not bot:
+            return None
+        if not self._is_uploadable_path(file_path):
+            return None
+        bot_root = bot.path.resolve()
+        candidate = (bot_root / file_path).resolve()
+        try:
+            candidate.relative_to(bot_root)
+        except ValueError:
+            return None
+        return candidate
+
+    def _resolve_bot_any_path(self, bot_name: str, file_path: str) -> Path | None:
+        """Resolve any listed file (editable OR uploadable). Used by download/delete."""
+        # Try editable first; fall back to uploadable. Both share the same
+        # path-safety primitives, so this is just an OR over allow-lists.
+        return (
+            self._resolve_bot_file(bot_name, file_path)
+            or self._resolve_bot_upload_path(bot_name, file_path)
+        )
+
     def list_config_files(
         self,
         bot_name: str,
@@ -954,6 +1154,8 @@ class BotManager:
 
         Skips excluded subtrees (`.git`, `.venv`, etc.). Capped at `max_depth`
         levels and `max_files` entries to keep the UI responsive on big trees.
+        Each entry has an `editable` flag — uploaded binaries (e.g. `.pkl`,
+        sqlite, xlsx) are listed but not openable in the text editor.
         """
         with self.bots_lock:
             bot = self.bots.get(bot_name)
@@ -981,7 +1183,9 @@ class BotManager:
                     continue
                 if not entry.is_file():
                     continue
-                if not self._is_editable_filename(entry.name):
+                editable = self._is_editable_filename(entry.name)
+                uploadable = self._is_uploadable_filename(entry.name)
+                if not (editable or uploadable):
                     continue
                 try:
                     stat = entry.stat()
@@ -998,6 +1202,7 @@ class BotManager:
                         "mtime_human": datetime.fromtimestamp(stat.st_mtime).strftime(
                             "%Y-%m-%d %H:%M:%S"
                         ),
+                        "editable": editable,
                     }
                 )
 
@@ -1046,6 +1251,46 @@ class BotManager:
             return False, f"Write failed: {exc}"
         self.log(bot_name, f"Config file updated: {file_path}")
         return True, "saved"
+
+    def upload_bot_file(
+        self, bot_name: str, file_path: str, data: bytes
+    ) -> tuple[bool, str]:
+        """Write raw bytes to an uploadable file. Creates parent folders if missing.
+
+        Used for binary payloads (pickles, sqlite, xlsx, …) that the text-only
+        editor can't handle. Caller is expected to have already enforced the
+        upload size cap, but we re-check defensively.
+        """
+        path = self._resolve_bot_upload_path(bot_name, file_path)
+        if path is None:
+            return False, "File not allowed"
+        if len(data) > UPLOAD_FILE_MAX_BYTES:
+            return False, (
+                f"Upload too large; limit {UPLOAD_FILE_MAX_BYTES} bytes"
+            )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        except OSError as exc:
+            return False, f"Write failed: {exc}"
+        self.log(
+            bot_name, f"File uploaded: {file_path} ({self._format_bytes(len(data))})"
+        )
+        return True, "uploaded"
+
+    def delete_bot_file(self, bot_name: str, file_path: str) -> tuple[bool, str]:
+        """Delete an editable or uploadable file inside a bot folder."""
+        path = self._resolve_bot_any_path(bot_name, file_path)
+        if path is None:
+            return False, "File not allowed"
+        if not path.is_file():
+            return False, "File not found"
+        try:
+            path.unlink()
+        except OSError as exc:
+            return False, f"Delete failed: {exc}"
+        self.log(bot_name, f"File deleted: {file_path}")
+        return True, "deleted"
 
     def create_bot_folder(self, bot_name: str, rel_path: str) -> tuple[bool, str]:
         """Create a folder (mkdir -p) inside a bot's directory tree."""
@@ -1137,6 +1382,43 @@ class BotManager:
         BACKUP_STATUS_PATH.write_text(
             json.dumps(self.backup_status, indent=2), encoding="utf-8"
         )
+
+    def _load_bot_settings(self) -> dict[str, dict[str, object]]:
+        if not BOT_SETTINGS_PATH.exists():
+            return {}
+        try:
+            data = json.loads(BOT_SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_bot_settings(self) -> None:
+        BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+        BOT_SETTINGS_PATH.write_text(
+            json.dumps(self.bot_settings, indent=2), encoding="utf-8"
+        )
+
+    def set_bot_settings(
+        self, bot_name: str, *, restart_on_crash: bool | None = None
+    ) -> tuple[bool, str]:
+        """Update per-bot settings and persist them. Currently just `restart_on_crash`."""
+        with self.bots_lock:
+            bot = self.bots.get(bot_name)
+        if not bot:
+            return False, "Unknown bot"
+        entry = dict(self.bot_settings.get(bot_name, {}))
+        if restart_on_crash is not None:
+            entry["restart_on_crash"] = bool(restart_on_crash)
+            bot.restart_on_crash = bool(restart_on_crash)
+        self.bot_settings[bot_name] = entry
+        try:
+            self._save_bot_settings()
+        except OSError as exc:
+            return False, f"Save failed: {exc}"
+        self.log(bot_name, f"Settings updated: restart_on_crash={bot.restart_on_crash}")
+        return True, "saved"
 
     def backup_bot(self, name: str, reason: str = "manual") -> tuple[bool, str]:
         with self.bots_lock:
@@ -1300,6 +1582,7 @@ class BotManager:
         for bot in sorted(bots, key=lambda b: b.name.lower()):
             health = self._get_backup_health(bot.name)
             storage_bytes = self._get_backup_storage_bytes(bot.name)
+            health_metrics = self._collect_health_metrics(bot)
             out.append(
                 {
                     "name": bot.name,
@@ -1312,9 +1595,74 @@ class BotManager:
                     "backup_storage_bytes": storage_bytes,
                     "backup_storage_human": self._format_bytes(storage_bytes),
                     "last_backup_at": bot.last_backup_at,
+                    "restart_on_crash": bot.restart_on_crash,
+                    # Resource metrics (None when not running or psutil missing).
+                    "pid": health_metrics["pid"],
+                    "rss_bytes": health_metrics["rss_bytes"],
+                    "rss_human": health_metrics["rss_human"],
+                    "cpu_pct": health_metrics["cpu_pct"],
+                    "uptime_sec": health_metrics["uptime_sec"],
+                    "uptime_human": health_metrics["uptime_human"],
                 }
             )
         return out
+
+    def _collect_health_metrics(self, bot: BotInfo) -> dict:
+        """Return PID/RSS/CPU/uptime for a running bot (Nones if unavailable).
+
+        Cross-platform via psutil; works on Linux (LXC), macOS, and Windows.
+        Tolerant of the process dying mid-snapshot or psutil being unavailable.
+        """
+        blank = {
+            "pid": None,
+            "rss_bytes": None,
+            "rss_human": "",
+            "cpu_pct": None,
+            "uptime_sec": None,
+            "uptime_human": "",
+        }
+        if not bot.is_running or bot.process is None:
+            return blank
+        pid = bot.process.pid
+        if psutil is None:
+            return {**blank, "pid": pid}
+        proc = self._psutil_procs.get(bot.name)
+        if proc is None or not proc.is_running() or proc.pid != pid:
+            try:
+                proc = psutil.Process(pid)
+                proc.cpu_percent(interval=None)
+                self._psutil_procs[bot.name] = proc
+            except Exception:
+                return {**blank, "pid": pid}
+        try:
+            rss = int(proc.memory_info().rss)
+            cpu = float(proc.cpu_percent(interval=None))
+            uptime = max(0.0, time.time() - proc.create_time())
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            self._psutil_procs.pop(bot.name, None)
+            return {**blank, "pid": pid}
+        return {
+            "pid": pid,
+            "rss_bytes": rss,
+            "rss_human": self._format_bytes(rss),
+            "cpu_pct": round(cpu, 1),
+            "uptime_sec": uptime,
+            "uptime_human": self._format_uptime(uptime),
+        }
+
+    @staticmethod
+    def _format_uptime(seconds: float) -> str:
+        s = int(seconds)
+        if s < 60:
+            return f"{s}s"
+        m, s = divmod(s, 60)
+        if m < 60:
+            return f"{m}m {s}s"
+        h, m = divmod(m, 60)
+        if h < 24:
+            return f"{h}h {m}m"
+        d, h = divmod(h, 24)
+        return f"{d}d {h}h"
 
     def snapshot_backup_status(self) -> list[dict]:
         """Per-bot backup status for the 'Show Last Backup Times' view."""
@@ -1363,6 +1711,7 @@ class BotManager:
                     if bot.process is not None and bot.process.poll() is not None:
                         bot.process = None
                         bot.process_reader = None
+                        self._psutil_procs.pop(bot.name, None)
             self._stop_event.wait(STATUS_REAPER_TICK_SEC)
 
     def _scheduler_loop(self) -> None:
@@ -1370,7 +1719,7 @@ class BotManager:
         while not self._stop_event.is_set():
             now = time.time()
 
-            update_interval = max(15, int(self.config.update_interval_sec))
+            update_interval = max(60, int(self.config.update_interval_sec))
             if (
                 not self._update_thread_running
                 and now - self._last_global_update_check >= update_interval

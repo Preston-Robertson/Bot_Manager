@@ -9,12 +9,17 @@ A lightweight **web dashboard** to discover, run, update, and back up Python Dis
 - Skips the manager's own folder so it never tries to run itself
 - Uses each bot's **own virtual environment** when available (`.venv`, `venv`, or `env`), checking both Windows (`Scripts/python.exe`) and POSIX (`bin/python`) layouts
 - One-click **Start / Stop / Restart** per bot
-- Periodic git update checks against `origin/main`
+- **Per-bot health metrics** in the dashboard table: PID, CPU%, RSS memory, uptime (via `psutil`)
+- **Crash detection + bounded auto-restart**: opt-in per bot via a dashboard checkbox. Logs the exit code, retries up to 3 times within a 10-minute window, then self-disables and asks for manual intervention to break restart loops. Intentional stops (SIGTERM) are distinguished from real crashes.
+- **Daily** auto update checks against `origin/main` by default (configurable; floor is 60 s)
 - **Manager self-update**: checks its own git checkout for updates and offers a one-click pull + restart from the dashboard
 - **Auto update + restart**: pulls `main` and restarts running bots when changes are detected
 - Scheduled per-bot data backups to local zip archives (gitignored)
 - Per-bot backup health badge: `Healthy`, `Due Soon`, `Overdue`, or `Failed`
 - Per-bot backup storage size shown in the table
+- **In-browser config-file editor** with subfolder support: edit `.json`, `.env`, `.yaml`, `.yml`, `.toml`, `.ini`, `.cfg`, `.txt` (and `.env.*`) up to 1 MB; create folders + files from the UI
+- **Binary file uploads** for `.pkl`, `.pickle`, `.csv`, `.db`, `.db3`, `.sqlite`, `.sqlite3`, `.xls`, `.xlsm`, `.xlsx` (up to 25 MB) — useful for shipping trained models / persisted state directly into a bot's folder
+- **Download + delete** any listed file from the dashboard (auth-protected; path-traversal safe)
 - **Live, per-bot log stream** in the browser over WebSocket
 - Browse and **download** backup zips directly from the dashboard
 - Settings persisted to `manager_config.json`
@@ -23,7 +28,7 @@ A lightweight **web dashboard** to discover, run, update, and back up Python Dis
 
 - Python 3.10 or newer
 - Git available in `PATH` (for update checks)
-- Three pip packages: `fastapi`, `uvicorn[standard]`, `jinja2` (see [requirements.txt](requirements.txt))
+- Four pip packages: `fastapi`, `uvicorn[standard]`, `jinja2`, `psutil` (see [requirements.txt](requirements.txt))
 
 Tkinter / `python3-tk` is **no longer required**.
 
@@ -72,14 +77,30 @@ export BOTMGR_PORT=28473
 ## Using the dashboard
 
 1. **Settings** — enter the **Bots Root Folder** (an absolute path on the server).
-   Optionally set a fallback **Python Executable**, the **Update Interval**, and the **Backup Interval**. Click **Save Settings**.
+   Optionally set a fallback **Python Executable**, the **Update Interval** (default `86400` = once per day; minimum 60 s), and the **Backup Interval**. Click **Save Settings**.
 2. Click **Scan Bots** to (re-)discover bots under that folder.
-3. Click a row to select a bot. The action bar reflects what's possible for that bot.
+3. Click a row to select a bot. The action bar reflects what's possible for that bot, including an **Auto-restart on crash** checkbox.
 4. **Start / Stop / Restart / Update Now** act on the selection.
 5. **Check Updates** runs a fetch + compare against `origin/main` for every git bot.
 6. **Backup Now** zips the selected bot's data files; **Backup All** queues them all.
 7. **Show Backup Status** opens a per-bot summary; **Browse Backups** lists archives for the selected bot and links each one for download.
-8. The **Logs** panel streams every bot's stdout + system messages live over WebSocket. The last ~2000 log lines are kept in memory and replayed when a new browser opens.
+8. **Config** opens the bot's file panel:
+   - Click any text file to open the in-browser editor (max 1 MB, UTF-8).
+   - **Create / Open File** with a subpath like `local_data/notes.txt` creates intermediate folders as needed.
+   - **Create Folder** makes a folder (`mkdir -p`).
+   - **Upload Binary** uploads a `.pkl` / `.sqlite` / `.xlsx` / etc. into a chosen destination path (max 25 MB).
+   - Each row has ↓ (download) and × (delete) buttons. All operations are scoped to the bot's folder and path-traversal-safe.
+9. The **Logs** panel streams every bot's stdout + system messages live over WebSocket. The last ~2000 log lines are kept in memory and replayed when a new browser opens. Crash exit codes and auto-restart attempts are recorded here.
+
+### Auto-restart on crash
+
+When the checkbox is ticked for a bot, the manager:
+
+- Logs `Process crashed (exit code N)` whenever the subprocess exits non-zero (and the manager didn't ask it to stop).
+- Schedules an auto-restart after a short delay.
+- Caps at **3 crashes within a 10-minute sliding window**. On the 4th crash inside that window it logs `Restart loop detected` and **self-disables** auto-restart for that bot until you start it manually — so a crash-looping bot never hammers your log forever.
+
+The setting is persisted to `bot_data/bot_settings.json` and survives manager restarts.
 
 ## How a folder is treated as a bot
 
@@ -121,13 +142,13 @@ User settings are stored in `manager_config.json` (gitignored). A template is pr
 {
   "bots_root": "",
   "python_executable": "",
-  "update_interval_sec": 120,
+  "update_interval_sec": 86400,
   "backup_interval_days": 1,
   "auto_update_restart": true
 }
 ```
 
-The app updates this file automatically when you save settings in the dashboard.
+The app updates this file automatically when you save settings in the dashboard. Per-bot settings (currently just `restart_on_crash`) live alongside the backup status at `bot_data/bot_settings.json`.
 
 ## Architecture
 
@@ -144,7 +165,8 @@ The Tk app was implicitly local-only; a network-exposed dashboard is not. For v1
 
 - **Bind deliberately.** Default is `0.0.0.0:28473`. Restrict at the firewall or set `BOTMGR_HOST=127.0.0.1` if you'll reach it through SSH tunneling.
 - **Set `BOTMGR_TOKEN`** for any deployment beyond a fully trusted LAN. The token is sent via `Authorization: Bearer …` on API calls and `?token=…` on the WebSocket / backup download links.
-- **Path-traversal safe.** Backup-download paths are validated to stay inside `bot_data/<sanitized_bot>/`.
+- **Path-traversal safe.** Backup downloads, config-file reads/writes, binary uploads, and file deletes all resolve paths against the bot's folder and reject anything that would escape it. Filenames are also restricted by extension allow-lists.
+- **Binary uploads** accept a fixed allow-list (`.pkl`, `.pickle`, `.csv`, `.db`, `.db3`, `.sqlite`, `.sqlite3`, `.xls`, `.xlsm`, `.xlsx`) capped at 25 MB. **Pickle deserialization is unsafe** — only upload pickles you trust. The manager never auto-loads them; it just stores the bytes for the bot to use.
 - **Bot stdout is visible in the log stream.** Don't print secrets from your bots, or keep the dashboard behind the token + LAN.
 
 Out of scope (for now): TLS, multi-user accounts, RBAC. Put the dashboard behind a reverse proxy (Caddy / nginx) if you need HTTPS.
@@ -219,7 +241,7 @@ Bot_Manager/
 ├── botmgr.env.example           # template for /etc/botmgr.env
 ├── manager_config.example.json
 ├── requirements.txt
-├── bot_data/                    # Local backups + backup status (gitignored)
+├── bot_data/                    # Local backups + bot_settings.json + backup_status.json (gitignored)
 ├── .gitignore
 └── README.md
 ```

@@ -72,7 +72,7 @@
         <input id="pythonExe" type="text" placeholder="/usr/bin/python3" />
       </label>
       <label>Update Interval (sec)
-        <input id="updateInterval" type="number" min="15" value="120" />
+        <input id="updateInterval" type="number" min="60" value="86400" />
       </label>
       <label>Backup Interval (days)
         <input id="backupInterval" type="number" min="1" value="1" />
@@ -118,6 +118,10 @@
     <button id="statusBtn" type="button">Show Backup Status</button>
     <button id="downloadsBtn" type="button" disabled>Browse Backups</button>
     <button id="configBtn" type="button" disabled>Config</button>
+    <label class="checkbox" id="restartOnCrashWrap" style="display:none">
+      <input id="restartOnCrash" type="checkbox" disabled />
+      Auto-restart on crash
+    </label>
     <span id="selectedLabel" class="selected-label">No bot selected</span>
   </section>
 
@@ -132,13 +136,14 @@
             <th>Entry</th>
             <th>Git</th>
             <th>Update</th>
+            <th>Health</th>
             <th>Backup</th>
             <th>Backup Size</th>
             <th>Path</th>
           </tr>
         </thead>
         <tbody id="botsTbody">
-          <tr><td colspan="8" class="empty">Loading…</td></tr>
+          <tr><td colspan="9" class="empty">Loading…</td></tr>
         </tbody>
       </table>
     </div>

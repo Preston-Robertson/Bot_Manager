@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from manager_core import BotManager, LogEntry
+from manager_core import BotManager, LogEntry, UPLOAD_FILE_MAX_BYTES
 
 logger = logging.getLogger("bot_manager.web")
 
@@ -300,6 +300,105 @@ async def create_bot_folder(name: str, request: Request):
     if not ok:
         return JSONResponse({"ok": False, "message": msg}, status_code=400)
     return {"ok": True, "message": msg, "path": rel_path}
+
+
+@app.post("/api/bots/{name}/uploads/{file_path:path}", dependencies=[AuthDep])
+async def upload_bot_file(name: str, file_path: str, request: Request):
+    """Accept a raw binary body and persist it under the bot folder.
+
+    The request body is the file bytes directly (not multipart). Frontend
+    sends `fetch(url, { method: 'POST', body: fileObject })`. Size is
+    enforced both via Content-Length (when present) and after reading.
+    """
+    manager = get_manager(request)
+    _require_bot(manager, name)
+    # Short-circuit on Content-Length when the client advertises it, so we
+    # don't buffer a giant upload just to reject it.
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            if int(cl) > UPLOAD_FILE_MAX_BYTES:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "message": (
+                            f"Upload too large; limit {UPLOAD_FILE_MAX_BYTES} bytes"
+                        ),
+                    },
+                    status_code=413,
+                )
+        except ValueError:
+            pass
+    data = await request.body()
+    if len(data) > UPLOAD_FILE_MAX_BYTES:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": f"Upload too large; limit {UPLOAD_FILE_MAX_BYTES} bytes",
+            },
+            status_code=413,
+        )
+    if not data:
+        return JSONResponse(
+            {"ok": False, "message": "Empty upload"}, status_code=400
+        )
+    ok, msg = manager.upload_bot_file(name, file_path, data)
+    if not ok:
+        return JSONResponse({"ok": False, "message": msg}, status_code=400)
+    return {"ok": True, "message": msg, "path": file_path, "size": len(data)}
+
+
+@app.delete("/api/bots/{name}/files/{file_path:path}", dependencies=[AuthDep])
+async def delete_bot_file(name: str, file_path: str, request: Request):
+    """Delete an editable or uploaded file inside the bot folder."""
+    manager = get_manager(request)
+    _require_bot(manager, name)
+    ok, msg = manager.delete_bot_file(name, file_path)
+    if not ok:
+        # Map "not found" to 404 for clarity; other failures stay 400.
+        status_code = 404 if msg == "File not found" else 400
+        return JSONResponse({"ok": False, "message": msg}, status_code=status_code)
+    return {"ok": True, "message": msg}
+
+
+# Separate prefix so it doesn't collide with the JSON `GET .../files/{path}`
+# editor read route. Returns the file bytes as a download attachment.
+@app.get(
+    "/api/bots/{name}/files-download/{file_path:path}",
+    dependencies=[AuthDep],
+)
+async def download_bot_file(name: str, file_path: str, request: Request):
+    manager = get_manager(request)
+    _require_bot(manager, name)
+    path = manager._resolve_bot_any_path(name, file_path)
+    if path is None:
+        raise HTTPException(status_code=400, detail="File not allowed")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(
+        path=str(path),
+        filename=path.name,
+        media_type="application/octet-stream",
+    )
+
+
+@app.put("/api/bots/{name}/settings", dependencies=[AuthDep])
+async def set_bot_settings(name: str, request: Request):
+    """Update per-bot settings (currently only `restart_on_crash: bool`)."""
+    manager = get_manager(request)
+    _require_bot(manager, name)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+    restart_on_crash = payload.get("restart_on_crash")
+    if restart_on_crash is not None and not isinstance(restart_on_crash, bool):
+        raise HTTPException(
+            status_code=400, detail="'restart_on_crash' must be a boolean"
+        )
+    ok, msg = manager.set_bot_settings(name, restart_on_crash=restart_on_crash)
+    if not ok:
+        return JSONResponse({"ok": False, "message": msg}, status_code=400)
+    return {"ok": True, "message": msg, "bots": manager.snapshot_bots()}
 
 
 # ---------------------------------------------------------------------------

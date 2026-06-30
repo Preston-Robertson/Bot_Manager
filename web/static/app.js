@@ -96,7 +96,7 @@ async function loadConfig() {
     const { config } = await api("/api/config");
     document.getElementById("botsRoot").value = config.bots_root || "";
     document.getElementById("pythonExe").value = config.python_executable || "";
-    document.getElementById("updateInterval").value = config.update_interval_sec ?? 120;
+    document.getElementById("updateInterval").value = config.update_interval_sec ?? 86400;
     document.getElementById("backupInterval").value = config.backup_interval_days ?? 1;
     document.getElementById("autoUpdate").checked = !!config.auto_update_restart;
   } catch (e) {
@@ -108,7 +108,7 @@ async function saveConfig() {
   const payload = {
     bots_root: document.getElementById("botsRoot").value.trim(),
     python_executable: document.getElementById("pythonExe").value.trim(),
-    update_interval_sec: parseInt(document.getElementById("updateInterval").value || "120", 10),
+    update_interval_sec: parseInt(document.getElementById("updateInterval").value || "86400", 10),
     backup_interval_days: parseInt(document.getElementById("backupInterval").value || "1", 10),
     auto_update_restart: document.getElementById("autoUpdate").checked,
   };
@@ -142,7 +142,7 @@ function healthBadge(health) {
 function renderBots() {
   const tbody = document.getElementById("botsTbody");
   if (!state.bots.length) {
-    tbody.innerHTML = `<tr><td colspan="8" class="empty">No bots found. Set a root folder and click Scan Bots.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="empty">No bots found. Set a root folder and click Scan Bots.</td></tr>`;
     return;
   }
 
@@ -158,6 +158,7 @@ function renderBots() {
         <td>${escapeHtml(bot.entry_file)}</td>
         <td>${bot.is_git_repo ? "Yes" : "No"}</td>
         <td>${updateBadge(bot.update_available)}</td>
+        <td>${healthCellHtml(bot)}</td>
         <td>${healthBadge(bot.backup_health)}</td>
         <td>${escapeHtml(bot.backup_storage_human)}</td>
         <td class="path">${escapeHtml(bot.path)}</td>
@@ -174,6 +175,17 @@ function renderBots() {
   });
 }
 
+// Compact "PID 1234 · CPU 1.2% · RSS 142 MB · 1h 23m" cell.
+function healthCellHtml(bot) {
+  if (!bot.is_running) return `<span class="muted">—</span>`;
+  const parts = [];
+  if (bot.pid != null) parts.push(`PID ${bot.pid}`);
+  if (bot.cpu_pct != null) parts.push(`CPU ${bot.cpu_pct.toFixed(1)}%`);
+  if (bot.rss_human) parts.push(`RSS ${escapeHtml(bot.rss_human)}`);
+  if (bot.uptime_human) parts.push(escapeHtml(bot.uptime_human));
+  return parts.length ? `<span class="health">${parts.join(" &middot; ")}</span>` : `<span class="muted">running</span>`;
+}
+
 function updateActionBar() {
   const bot = state.bots.find((b) => b.name === state.selected);
   const toggleBtn = document.getElementById("toggleBtn");
@@ -183,6 +195,8 @@ function updateActionBar() {
   const downloadsBtn = document.getElementById("downloadsBtn");
   const configBtn = document.getElementById("configBtn");
   const label = document.getElementById("selectedLabel");
+  const crashWrap = document.getElementById("restartOnCrashWrap");
+  const crashChk = document.getElementById("restartOnCrash");
 
   if (!bot) {
     toggleBtn.textContent = "Start Bot";
@@ -193,6 +207,8 @@ function updateActionBar() {
     downloadsBtn.disabled = true;
     configBtn.disabled = true;
     label.textContent = "No bot selected";
+    crashWrap.style.display = "none";
+    crashChk.disabled = true;
     return;
   }
 
@@ -204,6 +220,12 @@ function updateActionBar() {
   downloadsBtn.disabled = false;
   configBtn.disabled = false;
   label.textContent = `Selected: ${bot.name}`;
+  crashWrap.style.display = "";
+  crashChk.disabled = false;
+  // Don't fire the change handler while we sync state from the server.
+  crashChk.dataset.syncing = "1";
+  crashChk.checked = !!bot.restart_on_crash;
+  delete crashChk.dataset.syncing;
 }
 
 async function refreshBots() {
@@ -502,18 +524,29 @@ async function showConfigFiles() {
   try {
     const { files } = await api(`/api/bots/${encodeURIComponent(name)}/files`);
     const rows = files.length
-      ? files.map((f) => `
-          <tr>
-            <td><a href="#" class="file-link" data-path="${escapeHtml(f.path)}">${escapeHtml(f.path)}</a></td>
-            <td>${escapeHtml(f.size_human)}</td>
-            <td>${escapeHtml(f.mtime_human)}</td>
-          </tr>
-        `).join("")
-      : `<tr><td colspan="3" class="empty">No editable config files found yet. Use the inputs below to create one.</td></tr>`;
+      ? files.map((f) => {
+          // Uploaded binaries are listed but can't open in the text editor.
+          const cell = f.editable === false
+            ? `<span class="file-binary" title="Binary file — not editable">${escapeHtml(f.path)}</span> <span class="badge badge-neutral">binary</span>`
+            : `<a href="#" class="file-link" data-path="${escapeHtml(f.path)}">${escapeHtml(f.path)}</a>`;
+          const actions = `
+            <button type="button" class="small file-dl-btn" data-path="${escapeHtml(f.path)}" title="Download">&darr;</button>
+            <button type="button" class="small danger file-rm-btn" data-path="${escapeHtml(f.path)}" title="Delete">&times;</button>
+          `;
+          return `
+            <tr>
+              <td>${cell}</td>
+              <td>${escapeHtml(f.size_human)}</td>
+              <td>${escapeHtml(f.mtime_human)}</td>
+              <td class="file-actions">${actions}</td>
+            </tr>
+          `;
+        }).join("")
+      : `<tr><td colspan="4" class="empty">No editable config files found yet. Use the inputs below to create one.</td></tr>`;
 
     openModal(`Config — ${name}`, `
       <table>
-        <thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead>
+        <thead><tr><th>File</th><th>Size</th><th>Modified</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       <div class="create-file-row">
@@ -524,13 +557,43 @@ async function showConfigFiles() {
         <input id="newFolderName" type="text" placeholder="local_data" />
         <button id="newFolderBtn" type="button">Create Folder</button>
       </div>
-      <p class="hint">Allowed extensions: .json .env .yaml .yml .toml .ini .cfg .txt (or any <code>.env*</code>). Subfolders supported (use <code>/</code> in the filename, e.g. <code>local_data/notes.txt</code>). Max depth 5, max 500 files, max 1 MB per file. Excluded: <code>.git .venv venv env __pycache__ node_modules</code>. The editor is text-only — binary files (pickles, sqlite, zip…) won't open here.</p>
+      <div class="create-file-row">
+        <input id="uploadDest" type="text" placeholder="models/luigi.pkl (target path inside bot)" />
+        <input id="uploadFile" type="file" />
+        <button id="uploadBtn" type="button">Upload Binary</button>
+      </div>
+      <p class="hint">Text editor extensions: .json .env .yaml .yml .toml .ini .cfg .txt (or any <code>.env*</code>). Max 1 MB per file. Subfolders supported (use <code>/</code> in the filename).</p>
+      <p class="hint">Upload extensions (binary, not editable): .pkl .pickle .csv .db .db3 .sqlite .sqlite3 .xls .xlsm .xlsx. Max 25 MB per file. <strong>Note:</strong> pickle files are unsafe to load from untrusted sources — only upload pickles you trust.</p>
+      <p class="hint">Max depth 5, max 500 files. Excluded: <code>.git .venv venv env __pycache__ node_modules</code>.</p>
     `);
 
     document.querySelectorAll("#modal .file-link").forEach((a) => {
       a.addEventListener("click", (ev) => {
         ev.preventDefault();
         editConfigFile(name, ev.target.dataset.path);
+      });
+    });
+    document.querySelectorAll("#modal .file-dl-btn").forEach((btn) => {
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        downloadBotFile(name, ev.currentTarget.dataset.path);
+      });
+    });
+    document.querySelectorAll("#modal .file-rm-btn").forEach((btn) => {
+      btn.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        const fpath = ev.currentTarget.dataset.path;
+        if (!confirm(`Delete "${fpath}"?\nThis cannot be undone.`)) return;
+        try {
+          await api(
+            `/api/bots/${encodeURIComponent(name)}/files/${encodeFilePath(fpath)}`,
+            { method: "DELETE" }
+          );
+          toast(`Deleted: ${fpath}`);
+          showConfigFiles();
+        } catch (e) {
+          toast(`Delete failed: ${e.message}`, "error");
+        }
       });
     });
     document.getElementById("newConfigBtn").addEventListener("click", () => {
@@ -552,8 +615,71 @@ async function showConfigFiles() {
         toast(`Create folder failed: ${e.message}`, "error");
       }
     });
+    document.getElementById("uploadBtn").addEventListener("click", async () => {
+      const fileInput = document.getElementById("uploadFile");
+      const destInput = document.getElementById("uploadDest");
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) { toast("Pick a file to upload", "error"); return; }
+      const dest = destInput.value.trim() || file.name;
+      try {
+        await uploadBinaryFile(name, dest, file);
+        toast(`Uploaded: ${dest}`);
+        showConfigFiles();
+      } catch (e) {
+        toast(`Upload failed: ${e.message}`, "error");
+      }
+    });
   } catch (e) {
     toast(`Load config files failed: ${e.message}`, "error");
+  }
+}
+
+// Send a binary file as the raw request body (no multipart, no JSON wrap).
+// We bypass the `api()` helper because it forces a JSON Content-Type.
+async function uploadBinaryFile(botName, destPath, file) {
+  const url = `/api/bots/${encodeURIComponent(botName)}/uploads/${encodeFilePath(destPath)}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...authHeaders(),
+      "Content-Type": file.type || "application/octet-stream",
+    },
+    body: file,
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body.detail || body.message || detail;
+    } catch {}
+    throw new Error(`${res.status}: ${detail}`);
+  }
+  return res.json();
+}
+
+// Fetch a file with auth headers and trigger a browser download. We can't
+// use a plain <a download> link because the route requires Bearer auth.
+async function downloadBotFile(botName, filePath) {
+  const url = `/api/bots/${encodeURIComponent(botName)}/files-download/${encodeFilePath(filePath)}`;
+  try {
+    const res = await fetch(url, { headers: authHeaders() });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { const body = await res.json(); detail = body.detail || body.message || detail; } catch {}
+      throw new Error(`${res.status}: ${detail}`);
+    }
+    const blob = await res.blob();
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl;
+    // Browser uses the last path segment as the suggested filename.
+    a.download = filePath.split("/").pop();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
+  } catch (e) {
+    toast(`Download failed: ${e.message}`, "error");
   }
 }
 
@@ -677,6 +803,25 @@ function bindEvents() {
   document.getElementById("configBtn").addEventListener("click", showConfigFiles);
   document.getElementById("addRepoBtn").addEventListener("click", addBotFromGit);
   document.getElementById("mgrCheckBtn").addEventListener("click", mgrCheck);
+
+  // Auto-restart-on-crash toggle for the selected bot.
+  document.getElementById("restartOnCrash").addEventListener("change", async (ev) => {
+    if (ev.target.dataset.syncing) return; // change came from a server-state refresh
+    if (!state.selected) return;
+    const want = !!ev.target.checked;
+    try {
+      const { bots } = await api(
+        `/api/bots/${encodeURIComponent(state.selected)}/settings`,
+        { method: "PUT", body: JSON.stringify({ restart_on_crash: want }) }
+      );
+      if (bots) { state.bots = bots; renderBots(); updateActionBar(); }
+      toast(`Auto-restart ${want ? "enabled" : "disabled"} for ${state.selected}`);
+    } catch (e) {
+      toast(`Update failed: ${e.message}`, "error");
+      // Roll the checkbox back to whatever the server most recently said.
+      updateActionBar();
+    }
+  });
 
   const themeSelect = document.getElementById("themeSelect");
   if (themeSelect) {
