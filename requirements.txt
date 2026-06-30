@@ -1,1 +1,5 @@
-# Standard library only
+# Pinned to known-good versions. Bump deliberately; rerun
+# `pip install -r requirements.txt` after changes.
+fastapi==0.138.2
+uvicorn[standard]==0.49.0
+jinja2==3.1.6

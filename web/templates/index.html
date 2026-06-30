@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Discord Bot Manager</title>
+  <script>
+    // Apply saved theme before stylesheets paint so there's no flash of light.
+    (function () {
+      try {
+        var t = localStorage.getItem("botmgr.theme");
+        if (t) document.documentElement.setAttribute("data-theme", t);
+      } catch (_) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Discord Bot Manager</h1>
+    <div class="header-meta">
+      <span id="connStatus" class="conn dot-stopped">disconnected</span>
+      <span class="theme-wrap">
+        <label for="themeSelect">Theme</label>
+        <select id="themeSelect">
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+          <option value="solarized">Solarized</option>
+        </select>
+      </span>
+      {% if auth_required %}
+      <span class="token-wrap">
+        <label for="tokenInput">Token</label>
+        <input id="tokenInput" type="password" placeholder="BOTMGR_TOKEN" />
+        <button id="tokenSaveBtn" type="button">Save</button>
+      </span>
+      {% endif %}
+    </div>
+  </header>
+
+  <section class="card manager-card">
+    <h2>Manager</h2>
+    <div class="manager-row">
+      <div class="manager-info">
+        <div>
+          <strong>Status:</strong>
+          <span id="mgrStatusBadge" class="badge badge-neutral">loading…</span>
+          <span id="mgrDirtyBadge" class="badge badge-warn hidden">uncommitted changes</span>
+        </div>
+        <div class="manager-meta">
+          <span><strong>Branch:</strong> <code id="mgrBranch">—</code></span>
+          <span><strong>Commit:</strong> <code id="mgrCommit">—</code></span>
+          <span id="mgrLastCheck" class="hint">never checked</span>
+        </div>
+        <div id="mgrUpdateText" class="hint">—</div>
+      </div>
+      <div class="manager-actions">
+        <button id="mgrCheckBtn" type="button">Check for Updates</button>
+        <button id="mgrUpdateBtn" type="button" disabled>Update Manager</button>
+        <button id="mgrRestartBtn" type="button" class="danger">Restart Manager</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings card">
+    <h2>Settings</h2>
+    <div class="grid">
+      <label>Bots Root Folder
+        <input id="botsRoot" type="text" placeholder="/srv/bots" />
+      </label>
+      <label>Python Executable (optional)
+        <input id="pythonExe" type="text" placeholder="/usr/bin/python3" />
+      </label>
+      <label>Update Interval (sec)
+        <input id="updateInterval" type="number" min="15" value="120" />
+      </label>
+      <label>Backup Interval (days)
+        <input id="backupInterval" type="number" min="1" value="1" />
+      </label>
+      <label class="checkbox">
+        <input id="autoUpdate" type="checkbox" />
+        Auto update + restart
+      </label>
+      <div class="actions-right">
+        <button id="saveSettingsBtn" type="button">Save Settings</button>
+        <button id="scanBtn" type="button">Scan Bots</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Add Bot from GitHub</h2>
+    <div class="grid">
+      <label style="grid-column: span 2;">Repository URL
+        <input id="addRepoUrl" type="text" placeholder="https://github.com/user/MyBot.git" />
+      </label>
+      <label>Branch (optional)
+        <input id="addRepoBranch" type="text" placeholder="main" />
+      </label>
+      <label class="checkbox">
+        <input id="addRepoInstall" type="checkbox" checked />
+        Create .venv &amp; install requirements.txt
+      </label>
+      <div class="actions-right">
+        <button id="addRepoBtn" type="button" class="primary">Clone &amp; Add Bot</button>
+      </div>
+    </div>
+    <p class="hint">Public repos only. For private repos, configure SSH or a credential helper on the server.</p>
+  </section>
+
+  <section class="actions card">
+    <button id="toggleBtn" type="button" class="primary" disabled>Start Bot</button>
+    <button id="restartBtn" type="button" disabled>Restart</button>
+    <button id="updateBtn" type="button" disabled>Update Now</button>
+    <button id="checkUpdatesBtn" type="button">Check Updates</button>
+    <button id="backupBtn" type="button" disabled>Backup Now</button>
+    <button id="backupAllBtn" type="button">Backup All</button>
+    <button id="statusBtn" type="button">Show Backup Status</button>
+    <button id="downloadsBtn" type="button" disabled>Browse Backups</button>
+    <button id="configBtn" type="button" disabled>Config</button>
+    <span id="selectedLabel" class="selected-label">No bot selected</span>
+  </section>
+
+  <section class="card">
+    <h2>Bots</h2>
+    <div class="table-wrap">
+      <table id="botsTable">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Entry</th>
+            <th>Git</th>
+            <th>Update</th>
+            <th>Backup</th>
+            <th>Backup Size</th>
+            <th>Path</th>
+          </tr>
+        </thead>
+        <tbody id="botsTbody">
+          <tr><td colspan="8" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="logs-header">
+      <h2>Logs</h2>
+      <button id="clearLogsBtn" type="button" class="small">Clear</button>
+    </div>
+    <pre id="logs" class="logs"></pre>
+  </section>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-body">
+      <div class="modal-header">
+        <h3 id="modalTitle">Details</h3>
+        <button id="modalCloseBtn" type="button" class="small">Close</button>
+      </div>
+      <div id="modalContent"></div>
+    </div>
+  </div>
+
+  <script>
+    window.__BOTMGR__ = { authRequired: {{ 'true' if auth_required else 'false' }} };
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

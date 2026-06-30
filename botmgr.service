@@ -1,0 +1,26 @@
+[Unit]
+Description=Discord Bot Manager (web dashboard)
+Documentation=https://github.com/your-user/Bot_Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botmgr
+Group=botmgr
+WorkingDirectory=/opt/botmgr
+EnvironmentFile=/etc/botmgr.env
+ExecStart=/opt/botmgr/run_manager.sh
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening. Adjust if your bots_root lives under /home (then loosen ProtectHome).
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
