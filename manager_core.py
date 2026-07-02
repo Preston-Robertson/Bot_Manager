@@ -1294,6 +1294,31 @@ class BotManager:
                     continue
                 child_rel = f"{rel}/{entry.name}" if rel else entry.name
                 if entry.is_dir():
+                    # List the folder so the UI can show/delete it (including
+                    # empty ones or folders accidentally named like `.env`).
+                    try:
+                        stat = entry.stat()
+                    except OSError:
+                        stat = None
+                    out.append(
+                        {
+                            "path": child_rel,
+                            "name": entry.name,
+                            "folder": rel,
+                            "is_dir": True,
+                            "size": 0,
+                            "size_human": "",
+                            "mtime": stat.st_mtime if stat else 0.0,
+                            "mtime_human": (
+                                datetime.fromtimestamp(stat.st_mtime).strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                )
+                                if stat
+                                else ""
+                            ),
+                            "editable": False,
+                        }
+                    )
                     walk(entry, child_rel, depth + 1)
                     continue
                 if not entry.is_file():
@@ -1311,6 +1336,7 @@ class BotManager:
                         "path": child_rel,
                         "name": entry.name,
                         "folder": rel,
+                        "is_dir": False,
                         "size": stat.st_size,
                         "size_human": self._format_bytes(stat.st_size),
                         "mtime": stat.st_mtime,
@@ -1427,6 +1453,53 @@ class BotManager:
             return False, f"mkdir failed: {exc}"
         self.log(bot_name, f"Folder created: {rel_path}")
         return True, "created"
+
+    def delete_bot_folder(
+        self, bot_name: str, rel_path: str, recursive: bool = False
+    ) -> tuple[bool, str]:
+        """Delete a folder inside a bot directory.
+
+        Non-recursive by default: only empty folders are removed. Pass
+        `recursive=True` to force-remove a non-empty tree (used by the UI
+        after an explicit confirmation).
+        """
+        with self.bots_lock:
+            bot = self.bots.get(bot_name)
+        if not bot:
+            return False, "Unknown bot"
+        if not self._is_safe_folder_path(rel_path):
+            return False, "Folder path is invalid"
+        bot_root = bot.path.resolve()
+        target = (bot_root / rel_path).resolve()
+        # Refuse to touch the bot root itself or anything outside it.
+        if target == bot_root:
+            return False, "Refusing to delete the bot root"
+        try:
+            target.relative_to(bot_root)
+        except ValueError:
+            return False, "Folder would escape the bot folder"
+        if not target.exists():
+            return False, "Folder not found"
+        if not target.is_dir():
+            return False, "Path is not a folder"
+        try:
+            is_empty = not any(target.iterdir())
+        except OSError as exc:
+            return False, f"Read failed: {exc}"
+        if is_empty:
+            try:
+                target.rmdir()
+            except OSError as exc:
+                return False, f"rmdir failed: {exc}"
+        else:
+            if not recursive:
+                # Sentinel string the UI keys off to offer a recursive retry.
+                return False, "Folder is not empty"
+            self._remove_tree(target)
+            if target.exists():
+                return False, "Recursive delete failed"
+        self.log(bot_name, f"Folder deleted: {rel_path}")
+        return True, "deleted"
 
     # ------------------------------------------------------------------
     # Backups

@@ -227,6 +227,7 @@ header h1 { font-size: 18px; margin: 0; }
 .create-file-row .hint { margin: 0; }
 
 .file-binary { color: var(--muted); cursor: default; }
+.file-folder { color: var(--muted); cursor: default; font-weight: 600; }
 .file-actions { white-space: nowrap; text-align: right; }
 .file-actions button { margin-left: 4px; }
 .health { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; font-size: 12px; color: var(--muted); }

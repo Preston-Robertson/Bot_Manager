@@ -310,6 +310,38 @@ async def create_bot_folder(name: str, request: Request):
     return {"ok": True, "message": msg, "path": rel_path}
 
 
+@app.delete("/api/bots/{name}/folders/{folder_path:path}", dependencies=[AuthDep])
+async def delete_bot_folder(
+    name: str,
+    folder_path: str,
+    request: Request,
+    recursive: bool = Query(False),
+):
+    """Delete a folder inside a bot directory.
+
+    Non-recursive by default (empty folders only). Pass `?recursive=true`
+    to force-remove a non-empty tree — the UI does this after an extra
+    confirmation prompt.
+    """
+    manager = get_manager(request)
+    _require_bot(manager, name)
+    ok, msg = manager.delete_bot_folder(name, folder_path, recursive=recursive)
+    if not ok:
+        if msg == "Folder not found":
+            status_code = 404
+        elif msg == "Folder is not empty":
+            # 409 lets the client distinguish "needs recursive" from other
+            # failures without string-matching the message.
+            status_code = 409
+        else:
+            status_code = 400
+        return JSONResponse(
+            {"ok": False, "message": msg, "path": folder_path},
+            status_code=status_code,
+        )
+    return {"ok": True, "message": msg, "path": folder_path}
+
+
 @app.post("/api/bots/{name}/uploads/{file_path:path}", dependencies=[AuthDep])
 async def upload_bot_file(name: str, file_path: str, request: Request):
     """Accept a raw binary body and persist it under the bot folder.

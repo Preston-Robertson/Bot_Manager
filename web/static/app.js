@@ -556,6 +556,22 @@ async function showConfigFiles() {
     const { files } = await api(`/api/bots/${encodeURIComponent(name)}/files`);
     const rows = files.length
       ? files.map((f) => {
+          if (f.is_dir) {
+            // Folders are listed so the user can spot and delete stray
+            // ones (e.g. a `.env` accidentally created as a directory).
+            const cell = `<span class="file-folder" title="Folder">${escapeHtml(f.path)}/</span> <span class="badge badge-neutral">folder</span>`;
+            const actions = `
+              <button type="button" class="small danger folder-rm-btn" data-path="${escapeHtml(f.path)}" title="Delete folder">&times;</button>
+            `;
+            return `
+              <tr>
+                <td>${cell}</td>
+                <td></td>
+                <td>${escapeHtml(f.mtime_human || "")}</td>
+                <td class="file-actions">${actions}</td>
+              </tr>
+            `;
+          }
           // Uploaded binaries are listed but can't open in the text editor.
           const cell = f.editable === false
             ? `<span class="file-binary" title="Binary file — not editable">${escapeHtml(f.path)}</span> <span class="badge badge-neutral">binary</span>`
@@ -623,6 +639,37 @@ async function showConfigFiles() {
           toast(`Deleted: ${fpath}`);
           showConfigFiles();
         } catch (e) {
+          toast(`Delete failed: ${e.message}`, "error");
+        }
+      });
+    });
+    document.querySelectorAll("#modal .folder-rm-btn").forEach((btn) => {
+      btn.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        const fpath = ev.currentTarget.dataset.path;
+        if (!confirm(`Delete folder "${fpath}"?\nOnly empty folders are removed by default.`)) return;
+        const url = `/api/bots/${encodeURIComponent(name)}/folders/${encodeFilePath(fpath)}`;
+        try {
+          await api(url, { method: "DELETE" });
+          toast(`Deleted folder: ${fpath}`);
+          showConfigFiles();
+        } catch (e) {
+          // The DELETE endpoint returns 409 when the folder is non-empty
+          // so we can offer a recursive-delete retry without silently
+          // wiping data on the first click.
+          if (/^409:/.test(e.message)) {
+            if (!confirm(`Folder "${fpath}" is not empty.\nRecursively delete it and ALL its contents? This cannot be undone.`)) {
+              return;
+            }
+            try {
+              await api(`${url}?recursive=true`, { method: "DELETE" });
+              toast(`Recursively deleted: ${fpath}`);
+              showConfigFiles();
+            } catch (e2) {
+              toast(`Delete failed: ${e2.message}`, "error");
+            }
+            return;
+          }
           toast(`Delete failed: ${e.message}`, "error");
         }
       });
