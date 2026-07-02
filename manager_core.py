@@ -6,6 +6,7 @@ container. All UI concerns (Tk, web, CLI) layer on top of `BotManager`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -699,6 +700,9 @@ class BotManager:
 
         was_running = bot.is_running
 
+        req_path = bot.path / "requirements.txt"
+        before = self._requirements_fingerprint(req_path)
+
         ok, output = self._run_git(bot.path, ["pull", "origin", "main", "--ff-only"], timeout=90)
         if not ok:
             self.log(bot.name, f"Update failed: {output}")
@@ -707,9 +711,69 @@ class BotManager:
         bot.update_available = False
         self.log(bot.name, "Updated from origin/main")
 
+        after = self._requirements_fingerprint(req_path)
+        if after is not None and after != before:
+            py = self._find_bot_venv_python(bot.path)
+            if py is not None:
+                self.log(bot.name, "requirements.txt changed — installing dependencies")
+                self._pip_install_requirements(py, req_path, bot.name)
+            else:
+                self.log(
+                    bot.name,
+                    "requirements.txt changed but no venv found; skipping pip install",
+                )
+
         if self.config.auto_update_restart and was_running:
             self.log(bot.name, "Restarting after update")
             self._restart_bot(bot)
+
+    # ------------------------------------------------------------------
+    # requirements.txt install helpers (used after bot + manager updates)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _requirements_fingerprint(req_path: Path) -> tuple[int, str] | None:
+        """Return (size, sha256) for a requirements file, or None if missing."""
+        try:
+            data = req_path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None
+        return (len(data), hashlib.sha256(data).hexdigest())
+
+    def _find_bot_venv_python(self, bot_dir: Path) -> Path | None:
+        for venv_dir in (".venv", "venv", "env"):
+            py = self._venv_python_path(bot_dir / venv_dir)
+            if py is not None:
+                return py
+        return None
+
+    def _pip_install_requirements(
+        self,
+        py_exec: Path,
+        req_path: Path,
+        channel: str,
+        timeout: int = 600,
+    ) -> bool:
+        self.log(channel, f"Running pip install -r {req_path.name} ({py_exec})")
+        try:
+            completed = subprocess.run(
+                [str(py_exec), "-m", "pip", "install", "-r", str(req_path)],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            self.log(channel, f"pip install failed to launch: {exc}")
+            return False
+        if completed.returncode != 0:
+            output = (completed.stderr or completed.stdout or "").strip().splitlines()
+            tail = "\n".join(output[-10:]) if output else "unknown error"
+            self.log(channel, f"pip install failed:\n{tail}")
+            return False
+        self.log(channel, "Dependencies installed")
+        return True
 
     # ------------------------------------------------------------------
     # Manager self-update
@@ -833,6 +897,8 @@ class BotManager:
             stashed = True
             self.log("MANAGER", f"Stashed local changes before update: {stash_msg}")
         branch = status["branch"] or "main"
+        req_path = MANAGER_DIR / "requirements.txt"
+        before = self._requirements_fingerprint(req_path)
         ok, out = self._run_git(
             MANAGER_DIR, ["pull", "origin", branch, "--ff-only"], timeout=120
         )
@@ -844,7 +910,18 @@ class BotManager:
         if stashed:
             msg += " (local changes preserved in stash)"
         self.log("MANAGER", msg)
+
+        after = self._requirements_fingerprint(req_path)
+        deps_installed = False
+        if after is not None and after != before:
+            self.log("MANAGER", "requirements.txt changed — installing dependencies")
+            deps_installed = self._pip_install_requirements(
+                Path(sys.executable), req_path, "MANAGER"
+            )
+
         user_msg = "Manager updated. Restart to apply the new code."
+        if deps_installed:
+            user_msg += " Dependencies were reinstalled from requirements.txt."
         if stashed:
             user_msg += " Local changes were stashed; use `git stash list` on the host to inspect."
         return True, user_msg
