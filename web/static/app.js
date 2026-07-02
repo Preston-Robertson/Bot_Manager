@@ -815,16 +815,31 @@ async function editConfigFile(botName, filePath, createIfMissing = false) {
 // ---------------------------------------------------------------------------
 
 const LOG_MAX_LINES = 1000;
+// Threshold in px: if the user is within this many pixels of the bottom, we
+// treat them as "following the tail" and keep auto-scrolling. If they've
+// scrolled up further to read, we leave the scroll position alone so new
+// lines don't yank them back down.
+const LOG_AUTOSCROLL_THRESHOLD_PX = 40;
 const logsEl = document.getElementById("logs");
 
+function isLogsPinnedToBottom() {
+  const distanceFromBottom = logsEl.scrollHeight - logsEl.scrollTop - logsEl.clientHeight;
+  return distanceFromBottom <= LOG_AUTOSCROLL_THRESHOLD_PX;
+}
+
 function appendLog(entry) {
+  const wasPinned = isLogsPinnedToBottom();
   const line = `[${entry.time}] [${entry.source}] ${entry.message}\n`;
   logsEl.appendChild(document.createTextNode(line));
   // Trim oldest if we're over the cap.
   while (logsEl.childNodes.length > LOG_MAX_LINES) {
     logsEl.removeChild(logsEl.firstChild);
   }
-  logsEl.scrollTop = logsEl.scrollHeight;
+  // Only tail-follow when the user was already at the bottom; otherwise leave
+  // their scroll position alone so they can read older lines.
+  if (wasPinned) {
+    logsEl.scrollTop = logsEl.scrollHeight;
+  }
 }
 
 function setConn(connected, msg) {
@@ -937,8 +952,8 @@ async function init() {
   await refreshBots();
   await loadManagerInfo();
   connectLogs();
-  setInterval(refreshBots, 2500);
-  setInterval(loadManagerInfo, 30000);
+  setInterval(refreshBots, 5000);
+  setInterval(loadManagerInfo, 60000);
 }
 
 document.addEventListener("DOMContentLoaded", init);
