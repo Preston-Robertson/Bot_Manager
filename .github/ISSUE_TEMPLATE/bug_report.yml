@@ -1,0 +1,61 @@
+name: Bug report
+description: Report something that's broken in Bot Manager
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! The more detail you give, the faster it can be fixed.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected to happen instead.
+      placeholder: When I click "Start" on a bot, ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps that reliably reproduce the problem.
+      placeholder: |
+        1. Set bots root to '...'
+        2. Click 'Scan Bots'
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Paste the relevant lines from the dashboard's Logs panel or `journalctl -u botmgr.service`.
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: Bot Manager commit / version
+      description: Output of `git rev-parse --short HEAD` inside the Bot_Manager checkout.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux (bare metal / VM)
+        - Linux (Proxmox LXC)
+        - Windows
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python3 --version`.
+      placeholder: "3.11.6"
+    validations:
+      required: true

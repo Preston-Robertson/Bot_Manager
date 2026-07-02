@@ -1,6 +1,20 @@
 # Discord Bot Manager
 
+![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688?logo=fastapi&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey)
+![Deploy](https://img.shields.io/badge/deploy-systemd%20%7C%20Proxmox%20LXC-orange)
+![Status](https://img.shields.io/badge/status-active-brightgreen)
+
 A lightweight **web dashboard** to discover, run, update, and back up Python Discord bots from one place. Designed to run headless on a Linux box (e.g. a Proxmox LXC) and be operated from any browser on your LAN.
+
+## At a glance
+
+- **What it is:** a single self-hosted control panel for all your Python Discord bots — no Docker, no cloud, no per-bot terminal windows.
+- **Who it's for:** homelab / Proxmox / small-team operators running more than one Discord bot from the same box and tired of juggling `tmux` sessions, `systemd` units, and manual `git pull`s.
+- **What it does:** auto-discovers bots in a folder, runs each in its own venv, streams logs live to the browser, checks `origin/main` for updates on a schedule, auto-restarts on crash (with loop protection), backs up bot data to zip archives, and lets you edit config files + upload binary assets (models, sqlite DBs, pickles) from the UI.
+- **What it isn't:** a Discord bot itself, a multi-tenant SaaS, or a replacement for `systemd` at the OS level — it *complements* systemd (there's a ready-made unit file included).
+- **Stack:** Python 3.10+ · FastAPI · Uvicorn · Jinja2 · psutil · vanilla JS + WebSocket front-end.
 
 ## Features
 
